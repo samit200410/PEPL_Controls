@@ -1,7 +1,13 @@
 import numpy as np
 import sys, time, struct, serial
 import multiprocessing as mp
+import socket
 
+# TCP Ports
+TCP_PORT_TX = None # TODO: Set this to the actual TCP port for sending data to LabView
+TCP_PORT_RX = None # TODO: Set this to the actual TCP port for receiving data from LabView
+
+# Serial stuff might delete
 SERIAL_PORT = ""
 SYNC = 0xAA
 PAYLOAD_SIZE = -1  # TODO: Set this to the actual payload size from LabView
