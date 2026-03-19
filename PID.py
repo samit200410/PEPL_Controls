@@ -47,7 +47,7 @@ def reader_thread():
             try:
                 pkt = struct.unpack(READ_FMT, payload)
             except struct.error:
-                print("What the freak?")
+                print("What the freak? Hold up, wait a minute, sum ain't right")
                 continue
 
             with lock:
