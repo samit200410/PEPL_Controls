@@ -72,13 +72,13 @@ def PID_threadspawner():
     # Start thread for magnetic coil current control
     pass
 
-def PID_discharge_current(measured_current, desired_current, nominal_flow
+def PID_discharge_current(measured_current, desired_current, nominal_flow,
                           integral_error, previous_error, dt):
-    #TODO: Implement PID control for discharge current
+    
+    # TODO: Implement Testbench and tune variables
 
     # PID Variable Gains 
-    # TODO: Make these global if they won't change
-    #       If higher 
+    # TODO: Make these global if they won't change 
     Kp = None #FILL IN
     Ki = None #FILL IN
     Kd = None #FILL IN
@@ -108,9 +108,45 @@ def PID_discharge_current(measured_current, desired_current, nominal_flow
     return flow_control, integral_error, previous_error, error
 
 
-def PID_magnetic_coil_current():
-    #TODO: Implement PID control for magnetic coil current
-    pass
+def PID_magnetic_coil_current(measured_oscillation, desired_oscillation, nominal_coil_current,
+                              integral_error, previous_error, dt):
+    # TODO: Implement Testbench and tune variables
+
+    Kp = None
+    Ki = None
+    Kd = None
+
+    # Flow Safety
+    coil_min = None
+    coil_max = None
+
+    # Integral Windup Prevention
+    integral_min = None
+    integral_max = None
+
+    # Step 1: compute control error
+    error = desired_oscillation - measured_oscillation
+
+    # Step 2: update integral term
+    integral_error += error * dt
+    integral_error = max(min(integral_error, integral_max), integral_min)
+
+    # Step 3: compute derivative term
+    derivative_error = (error - previous_error) / dt
+
+    # Step 4: PID formula
+    correction = Kp * error + Ki * integral_error + Kd * derivative_error
+
+    # Step 5: compute commanded magnetic coil current
+    coil_command = nominal_coil_current + correction
+
+    # Step 6: clamp coil command to safe range
+    coil_command = max(min(coil_command, coil_max), coil_min)
+
+    # Step 7: update memory for next call
+    previous_error = error
+
+    return coil_command, integral_error, previous_error, error
 
 def  main():
 
