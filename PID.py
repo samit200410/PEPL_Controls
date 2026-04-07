@@ -3,16 +3,26 @@ import sys, time, struct, serial
 import multiprocessing as mp
 import socket
 
-# TCP Ports
-TCP_PORT_TX = None # TODO: Set this to the actual TCP port for sending data to LabView
-TCP_PORT_RX = None # TODO: Set this to the actual TCP port for receiving data from LabView
+# TCP Server Config (TX)
+HOST = socket.gethostname(socket.gethostbyname())  
+TCP_PORT_TX = 6700 
+TCP_TX = (HOST, TCP_PORT_TX)
+WRITE_FMT = None # TODO: Set this to the actual struct format string for packing packets to LabView
+
+# TCP Client Config (RX)
+LABVIEW_IP = '10.0.0.1'
+TCP_PORT_RX = 6701 # TODO: Set this to the actual TCP port for receiving data from LabView
+TCP_RX = (LABVIEW_IP, TCP_PORT_RX)
+READ_FMT = None # TODO: Set this to the actual struct format string for unpacking LabView packets
+
+HEADER_SIZE = 64  
 
 # Serial stuff might delete
 SERIAL_PORT = ""
 SYNC = 0xAA
 PAYLOAD_SIZE = -1  # TODO: Set this to the actual payload size from LabView
-READ_FMT = None # TODO: Set this to the actual struct format string for unpacking LabView packets
-WRITE_FMT = None # TODO: Set this to the actual struct format string for packing packets to LabView
+
+
 
 # Shared Data
 latest_packet = None
@@ -20,6 +30,15 @@ latest_packet = None
 # Locks for shared data
 reader_lock = mp.Lock()
 writer_lock = mp.Lock()
+
+def TCP_server_thread(conn, addr):
+    with conn:
+        print('Connected by', addr)
+        while True:
+            data = conn.recv(HEADER_SIZE)
+            if not data: break
+            msg_length = data.decode('utf-8').strip()
+
 
 
 # TODO: Check how packets are sent from LabView
@@ -69,6 +88,10 @@ def writer_thread():
 
 def PID_threadspawner():
     # TODO: Implement thread spawner for PID control of two processes
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind((HOST, TCP_PORT_RX))
+        s.listen(1)
+        conn, addr = s.accept()
 
     # Start thread for packet send and receive
 
