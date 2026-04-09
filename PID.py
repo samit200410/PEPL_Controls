@@ -5,24 +5,16 @@ import socket
 
 # TCP Server Config (TX)
 HOST = socket.gethostname(socket.gethostbyname())  
-TCP_PORT_TX = 6700 
-TCP_TX = (HOST, TCP_PORT_TX)
-WRITE_FMT = None # TODO: Set this to the actual struct format string for packing packets to LabView
+TCP_PORT_RX = 6700 
+TCP_RX = (HOST, TCP_PORT_RX)
 
 # TCP Client Config (RX)
 LABVIEW_IP = '10.0.0.1'
-TCP_PORT_RX = 6701 # TODO: Set this to the actual TCP port for receiving data from LabView
-TCP_RX = (LABVIEW_IP, TCP_PORT_RX)
-READ_FMT = None # TODO: Set this to the actual struct format string for unpacking LabView packets
+TCP_PORT_TX = 6701 # TODO: Set this to the actual TCP port for receiving data from LabView
+TCP_TX = (LABVIEW_IP, TCP_PORT_TX)
 
-HEADER_SIZE = 64  
-
-# Serial stuff might delete
-SERIAL_PORT = ""
-SYNC = 0xAA
-PAYLOAD_SIZE = -1  # TODO: Set this to the actual payload size from LabView
-
-
+COMMAND = 1  
+LENGTH = 4
 
 # Shared Data
 latest_packet = None
@@ -35,71 +27,43 @@ def TCP_server_thread(conn, addr):
     with conn:
         print('Connected by', addr)
         while True:
-            data = conn.recv(HEADER_SIZE)
+            cmd = conn.recv(COMMAND)
+            if not cmd: break
+            msg_cmd = cmd.decode('utf-8').strip()
+            dat_len = conn.recv(LENGTH)
+            if not dat_len: break
+            msg_len = dat_len.decode('utf-8').strip()
+            data = conn.recv(int(msg_len))
             if not data: break
-            msg_length = data.decode('utf-8').strip()
+            print(f"Received command: {msg_cmd}, data length: {msg_len}, data: {data}")
 
-
-
-# TODO: Check how packets are sent from LabView
-# CRC8 function for checking packet integrity from LabView
-def compute_crc8(data: bytes) -> int:
-    crc = 0x00
-    for b in data:
-        crc ^= b
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x07) & 0xFF if (crc & 0x80) else ((crc << 1) & 0xFF)
-    return crc
-
-def reader_thread():
-    # TODO: Implement reader thread for handling packet send and receive
-    global latest_packet
-    try:
-        while(True):
-            b = serial.read(1)
-            if not b:
-                continue
-            if b[0] != SYNC:
-                continue
-            payload = serial.read(PAYLOAD_SIZE)
-            
-            crc_bit = serial.read(1)
-            if len(crc_bit) != 1:
-                continue
-            if compute_crc8(payload) != crc_bit[0]:
-                continue
-
-            try:
-                pkt = struct.unpack(READ_FMT, payload)
-            except struct.error:
-                print("What the freak? Hold up, wait a minute, sum ain't right")
-                continue
-
-            with lock:
-                latest_packet = pkt
-
-    except Exception:
-        print("Error in reader thread")
-
-def writer_thread():
-    # TODO: Implement writer thread for sending packets to LabView
-    
-    pass
 
 def PID_threadspawner():
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+        client_socket.connect(TCP_TX)
+
     # TODO: Implement thread spawner for PID control of two processes
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind((HOST, TCP_PORT_RX))
+        s.bind(TCP_RX)
         s.listen(1)
         conn, addr = s.accept()
 
     # Start thread for packet send and receive
-
+    reader_thread = mp.Process(target=TCP_server_thread, args=(conn, addr))
+    reader_thread.start()
     
     # Start thread for discharge current controls
+    discharge_current_thread = mp.Process(target=PID_discharge_current, args=(...)) # TODO: Fill in arguments
+    discharge_current_thread.start()
 
     # Start thread for magnetic coil current control
-    pass
+    magnetic_coil_thread = mp.Process(target=PID_magnetic_coil_current, args=(...)) # TODO: Fill in arguments
+    magnetic_coil_thread.start()
+
+    reader_thread.join()
+    discharge_current_thread.join()
+    magnetic_coil_thread.join()
 
 def PID_discharge_current(measured_current, desired_current, nominal_flow,
                           integral_error, previous_error, dt):
