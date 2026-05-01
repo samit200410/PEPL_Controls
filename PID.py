@@ -91,18 +91,15 @@ def TCP_server_thread(conn, addr):
             # data = conn.recv(int(msg_len))
             # if not data: break
             # print(f"Received command: {msg_cmd}, data length: {msg_len}, data: {data}")
-
-def TCP_client_thread():
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-        client_socket.connect(TCP_TX)
-        while True:
-            # Send data to Labview
-            client_socket.sendall(struct.pack(cmd_fmt, 0b1, 0x10, 42, 420, 0b1, 4200, 42000, 420000, 4200000, 0b1, 0b1))  # Send test data
+        
 
 def PID_threadspawner():
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
         client_socket.connect(TCP_TX)
+        while True:
+            # Send data to Labview
+            client_socket.sendall(struct.pack(cmd_fmt, 0b1, 0x10, 42, 420, 0b1, 4200, 42000, 420000, 4200000, 0b1, 0b1))  # Send test data
 
     # TODO: Implement thread spawner for PID control of two processes
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -111,20 +108,20 @@ def PID_threadspawner():
         conn, addr = s.accept()
 
     # Start thread for packet send and receive
-    reader_thread = mp.Process(target=TCP_server_thread, args=(conn, addr))
-    reader_thread.start()
+    # reader_thread = mp.Process(target=TCP_server_thread, args=(conn, addr))
+    # reader_thread.start()
     
     # Start thread for discharge current controls
-    discharge_current_thread = mp.Process(target=PID_discharge_current, args=(...)) # TODO: Fill in arguments
-    discharge_current_thread.start()
+    # discharge_current_thread = mp.Process(target=PID_discharge_current, args=(...)) # TODO: Fill in arguments
+    # discharge_current_thread.start()
 
     # Start thread for magnetic coil current control
-    magnetic_coil_thread = mp.Process(target=PID_magnetic_coil_current, args=(...)) # TODO: Fill in arguments
-    magnetic_coil_thread.start()
+    # magnetic_coil_thread = mp.Process(target=PID_magnetic_coil_current, args=(...)) # TODO: Fill in arguments
+    # magnetic_coil_thread.start()
 
-    reader_thread.join()
-    discharge_current_thread.join()
-    magnetic_coil_thread.join()
+    # reader_thread.join()
+    # discharge_current_thread.join()
+    # magnetic_coil_thread.join()
 
 
 
