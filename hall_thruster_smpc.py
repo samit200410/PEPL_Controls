@@ -572,7 +572,8 @@ def maybe_plot(history: Dict[str, np.ndarray]) -> None:
     axes[2].grid(True)
 
     plt.tight_layout()
-    plt.show()
+    plt.savefig('hall_thruster_plot.png')
+    print("Plot saved to hall_thruster_plot.png")
 
 
 if __name__ == "__main__":
