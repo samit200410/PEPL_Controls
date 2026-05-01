@@ -1,3 +1,5 @@
+from http import client
+
 import numpy as np
 import sys, time, struct, serial
 import multiprocessing as mp
@@ -24,6 +26,7 @@ CATHODE_FRAC_NOMINAL = 0.07
 CATHODE_FRAC_MAX = 0.10
 # ----------------------------
 
+
 # ----------------------------
 # PID Turning
 
@@ -37,7 +40,6 @@ MAG_KP = None
 MAG_KI = None
 MAG_KD = None
 # ----------------------------
-
 
 
 
@@ -55,6 +57,14 @@ HEADER = 4
 COMMAND = 1  
 LENGTH = 4
 
+# Struct format for packing/unpacking data
+struct_fmt = '>I?dd'  # Example: unsigned int, bool, double, double
+exp_length = struct.calcsize(struct_fmt)
+
+# Struct client commands
+cmd_fmt = '>bi2d?4d2?'  # Example: byte, int, 2 doubles, bool, 4 doubles, 2 bools
+cmd_length = struct.calcsize(cmd_fmt)
+
 # Shared Data
 latest_packet = None
 
@@ -66,22 +76,28 @@ def TCP_server_thread(conn, addr):
     with conn:
         print('Connected by', addr)
         while True:
-            header = conn.recv(HEADER)
-            if not header: break
+            dat = conn.recv(exp_length)
+            if not dat: break
 
-            arr_size = struct.unpack('!I', header)[0]  # Network byte order (big-endian)
+            header, en, v_lim, i_lim = struct.unpack(struct_fmt, dat)
+            print(f"Received header: {header}, enabled: {en}, voltage limit: {v_lim}, current limit: {i_lim}")
 
+            # cmd = conn.recv(COMMAND)
+            # if not cmd: break
+            # msg_cmd = cmd.decode('utf-8').strip()
+            # dat_len = conn.recv(LENGTH)
+            # if not dat_len: break
+            # msg_len = dat_len.decode('utf-8').strip()
+            # data = conn.recv(int(msg_len))
+            # if not data: break
+            # print(f"Received command: {msg_cmd}, data length: {msg_len}, data: {data}")
 
-            cmd = conn.recv(COMMAND)
-            if not cmd: break
-            msg_cmd = cmd.decode('utf-8').strip()
-            dat_len = conn.recv(LENGTH)
-            if not dat_len: break
-            msg_len = dat_len.decode('utf-8').strip()
-            data = conn.recv(int(msg_len))
-            if not data: break
-            print(f"Received command: {msg_cmd}, data length: {msg_len}, data: {data}")
-
+def TCP_client_thread():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+        client_socket.connect(TCP_TX)
+        while True:
+            # Send data to Labview
+            client_socket.sendall(struct.pack(cmd_fmt, 0b1, 0x10, 42, 420, 0b1, 4200, 42000, 420000, 4200000, 0b1, 0b1))  # Send test data
 
 def PID_threadspawner():
 
