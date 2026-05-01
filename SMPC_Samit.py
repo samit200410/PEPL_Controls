@@ -3,11 +3,18 @@ import numpy as np
 from scipy.integrate import solve_ivp
 
 # Controller imports
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
 import matplotlib.pyplot as plt
 from scipy.linalg import block_diag
 from scipy.optimize import minimize
-from scipy
+from scipy.stats import multivariate_normal
 from casadi import *
+
+# ==========================================
+# CONSTANTS
+# ==========================================
+g = 9.81 # gravity (m/s^2)
 
 @dataclass
 class CartPoleNominal:
@@ -21,11 +28,39 @@ class ScenarioParams:
     m_p: float
     l: float
 
-# TODO: Get the mean and variance as a hyperparam for sampling
+# Take samples from gaussian distribution for each parameter to stochastisize the MPC
 def sample_Scenarios(
     nominal: CartPoleNominal,
-    ParamSpread: Dict[str, [float, float]] | None = None
+    ParamSpread: Dict[str, List[float, float]] | None = None,
+    num_samples: int
 ) -> List[ScenarioParams]:
+
+    scenarios: List[ScenarioParams] = []
+
+    if ParamSpread is None:
+        ParamSpread = {
+            "cart_mass_mean": 1.0,
+            "cart_mass_var": 0.25,
+            "pole_mass_mean": 0.1,
+            "pole_mass_var": 0.025,
+            "length_mean": 0.5,
+            "length_var": 0.0001    # maybe its a little stretchy or smth
+        }
+    
+    cart_dist = multivariate_normal(ParamSpread["cart_mass_mean"], ParamSpread["cart_mass_var"])
+    pole_dist = multivariate_normal(ParamSpread["pole_mass_mean"], ParamSpread["pole_mass_var"])
+    length_dist = multivariate_normal(ParamSpread["length_mean"], ParamSpread["length_var"])
+
+    for i in range(num_samples):
+        scenarios.append(
+            ScenarioParams(
+                m_c = cart_dist.rvs(1), 
+                m_p = pole_dist.rvs(1),
+                l = length_dist.rvs(1)
+            )
+        )
+
+    return scenarios
 
 class CartPole:
     def __init__(self, m_c=1.0, m_p=0.1, l=0.5, g=9.81):
@@ -112,22 +147,33 @@ class CartPole:
 
 
 class SMPC_Controller:
-    def __init__(self, S, N, dt):
+    def __init__(self, S: int, N: int, dt: float):
         """
         Initializes the SMPC Controller object.
         
         Parameters:
         S (int): Number of sampled scenarios
         N (int): Number of horizon steps
-        dt (int): time step (s)
+        dt (float): time step (s)
         """
         self.S = S
         self.N = N
         self.dt = dt
 
-        self.
+        self.x = vertcat(   MX.sym("x"), 
+                            MX.sym("x_dot"),
+                            MX.sym("theta"),
+                            MX.sym("theta_dot"))
+        
+        self.u = MX.sym("F")
 
-    def setup(self):
+        self.A_mat = vertcat(
+                horzcat(0, 1, 0, 0),
+                horzcat(0, 0, m*g/M, 0),
+                horzcat(0, 0, 0, 1),
+                horzcat(0, 0, g*(M + m)/(M*l), 0),
+        )
+
 
         
 

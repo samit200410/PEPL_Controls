@@ -13,6 +13,7 @@ LABVIEW_IP = '10.0.0.1'
 TCP_PORT_TX = 6701 # TODO: Set this to the actual TCP port for receiving data from LabView
 TCP_TX = (LABVIEW_IP, TCP_PORT_TX)
 
+HEADER = 4
 COMMAND = 1  
 LENGTH = 4
 
@@ -27,6 +28,12 @@ def TCP_server_thread(conn, addr):
     with conn:
         print('Connected by', addr)
         while True:
+            header = conn.recv(HEADER)
+            if not header: break
+
+            arr_size = struct.unpack('!I', header)[0]  # Network byte order (big-endian)
+
+
             cmd = conn.recv(COMMAND)
             if not cmd: break
             msg_cmd = cmd.decode('utf-8').strip()
