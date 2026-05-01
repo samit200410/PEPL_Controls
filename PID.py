@@ -44,13 +44,14 @@ MAG_KD = None
 
 
 # TCP Server Config (TX)
-HOST = socket.gethostname(socket.gethostbyname())  
+HOST = socket.gethostbyname(socket.gethostname()) #
+print(HOST)
 TCP_PORT_RX = 6700 
 TCP_RX = (HOST, TCP_PORT_RX)
 
 # TCP Client Config (RX)
 LABVIEW_IP = '10.0.0.1'
-TCP_PORT_TX = 6701 # TODO: Set this to the actual TCP port for receiving data from LabView
+TCP_PORT_TX = 59704 # TODO: Set this to the actual TCP port for receiving data from LabView
 TCP_TX = (LABVIEW_IP, TCP_PORT_TX)
 
 HEADER = 4
@@ -99,7 +100,7 @@ def PID_threadspawner():
         client_socket.connect(TCP_TX)
         while True:
             # Send data to Labview
-            client_socket.sendall(struct.pack(cmd_fmt, 0b1, 0x10, 42, 420, 0b1, 4200, 42000, 420000, 4200000, 0b1, 0b1))  # Send test data
+            client_socket.sendall(struct.pack(cmd_fmt, 0b1, 0x10, 0, 0, 0b1, 0, 0, 0, 0, 0b1, 0b1))  # Send test data
 
     # TODO: Implement thread spawner for PID control of two processes
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
