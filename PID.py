@@ -3,6 +3,44 @@ import sys, time, struct, serial
 import multiprocessing as mp
 import socket
 
+# ----------------------------
+# Safety Limites
+
+VOLTAGE_MIN = 200.0
+VOLTAGE_MAX = 300.0
+POWER_TARGET = 2000.0
+
+INNER_MAG_MIN = 3.5
+INNER_MAG_MAX = 6.0
+
+OUTER_MAG_MIN = 4.0
+OUTER_MAG_MAX = 7.5
+
+ANODE_FLOW_MIN = 60.0
+ANODE_FLOW_MAX = 120.0
+
+CATHODE_FRAC_MIN = 0.05
+CATHODE_FRAC_NOMINAL = 0.07
+CATHODE_FRAC_MAX = 0.10
+# ----------------------------
+
+# ----------------------------
+# PID Turning
+
+# Mass Flow
+FLOW_KP = 2.0
+FLOW_KI = 0.2
+FLOW_KD = 0.0
+
+# Magnetic Field
+MAG_KP = None
+MAG_KI = None
+MAG_KD = None
+# ----------------------------
+
+
+
+
 # TCP Server Config (TX)
 HOST = socket.gethostname(socket.gethostbyname())  
 TCP_PORT_RX = 6700 
@@ -65,6 +103,8 @@ def PID_threadspawner():
     discharge_current_thread.join()
     magnetic_coil_thread.join()
 
+
+
 def PID_discharge_current(measured_current, desired_current, nominal_flow,
                           integral_error, previous_error, dt):
     
@@ -72,17 +112,17 @@ def PID_discharge_current(measured_current, desired_current, nominal_flow,
 
     # PID Variable Gains 
     # TODO: Make these global if they won't change 
-    Kp = None #FILL IN
-    Ki = None #FILL IN
-    Kd = None #FILL IN
+    Kp = FLOW_KP
+    Ki = FLOW_KI
+    Kd = FLOW_KD
 
     # Flow Safety
-    flow_min = None
-    flow_max = None
+    flow_min = ANODE_FLOW_MIN
+    flow_max = ANODE_FLOW_MAX
     
     # Integral Windup Prevention
-    integral_min = None
-    integral_max = None
+    integral_min = -20.0
+    integral_max = 20.0
 
     error = desired_current - measured_current
 
@@ -101,17 +141,18 @@ def PID_discharge_current(measured_current, desired_current, nominal_flow,
     return flow_control, integral_error, previous_error, error
 
 
+
 def PID_magnetic_coil_current(measured_oscillation, desired_oscillation, nominal_coil_current,
                               integral_error, previous_error, dt):
     # TODO: Implement Testbench and tune variables
 
-    Kp = None
-    Ki = None
-    Kd = None
+    Kp = MAG_KP
+    Ki = MAG_KI
+    Kd = MAG_KD
 
     # Flow Safety
-    coil_min = None
-    coil_max = None
+    coil_min = OUTER_MAG_MIN
+    coil_max = OUTER_MAG_MAX
 
     # Integral Windup Prevention
     integral_min = None
@@ -140,6 +181,18 @@ def PID_magnetic_coil_current(measured_oscillation, desired_oscillation, nominal
     previous_error = error
 
     return coil_command, integral_error, previous_error, error
+
+def clamp(value, min_value, max_value):
+    return(max(min(value, max_value), min_value))
+
+def desired_current(voltage, POWER_TARGET):
+    safe_voltage = clamp(voltage, VOLTAGE_MIN, VOLTAGE_MAX)
+    return POWER_TARGET / safe_voltage
+
+def flow_rate(anode_flow, cathode_fraction = CATHODE_FRAC_NOMINAL):
+    safe_fraction = clamp(cathode_fraction, CATHODE_FRAC_MIN, CATHODE_FRAC_MAX)
+
+    return anode_flow * safe_fraction
 
 def  main():
 
