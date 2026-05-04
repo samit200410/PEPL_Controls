@@ -44,28 +44,31 @@ MAG_KD = None
 
 
 
-# TCP Server Config (TX)
+# TCP Server Configuration (TX)
 HOST = socket.gethostbyname(socket.gethostname()) #
-print(HOST)
-TCP_PORT_RX = 54709 
+print("Host IP: ", HOST)
+TCP_PORT_RX = 54709         # Set this to actual TCP port for transmitting data to LabView
 TCP_RX = (HOST, TCP_PORT_RX)
 
-# TCP Client Config (RX)
+# TCP Client Configuration (RX)
 LABVIEW_IP = '10.0.0.1'
-TCP_PORT_TX = 59704 # TODO: Set this to the actual TCP port for receiving data from LabView
+TCP_PORT_TX = 59704         # Set this to actual TCP port for receiving data from LabView
 TCP_TX = (LABVIEW_IP, TCP_PORT_TX)
 
+# Message Protocol Constants
 HEADER = 4
 COMMAND = 1  
 LENGTH = 4
 
-# Struct format for packing/unpacking data
-struct_fmt = '>bi2d?4d2?' # Example: byte, int, 2 doubles, bool, 4 doubles, 2 bools
+# Struct format for packing/unpacking data --> Big-Endian Order
+struct_fmt = '>bi2d?4d2?'           # Example: byte, int, 2 doubles, bool, 4 doubles, 2 bools
 exp_length = struct.calcsize(struct_fmt)
+print("Expected Packet Length: ", exp_length)
 
-# Struct client commands
-cmd_fmt = '>bi4d?' # Example: byte, int, 4 doubles, bool
+# Struct client commands --> Big-Endian Order
+cmd_fmt = '>bi4d?'                  # Example: byte, int, 4 doubles, bool
 cmd_length = struct.calcsize(cmd_fmt)
+print("Command Packet Length: ", cmd_length)
 
 # Shared Data
 latest_packet = None
@@ -73,6 +76,7 @@ latest_packet = None
 # Locks for shared data
 reader_lock = mp.Lock()
 writer_lock = mp.Lock()
+
 
 def TCP_server_thread(conn, addr):
     with conn:
@@ -98,12 +102,13 @@ def TCP_server_thread(conn, addr):
 def PID_threadspawner():
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-        print("Sending shit")
+        print("Sending Information to LabVIEW...")
         client_socket.connect(TCP_TX)
 
+        
         # Send data to Labview
         try:
-             # Example: byte, int, 2 doubles, bool, 4 doubles, 2 bools
+            # Example: byte, int, 2 doubles, bool, 4 doubles, 2 bools
             packet = struct.pack(cmd_fmt, 0x10, 0x00000021, 0.0, 0.0, 0.0, 0.0, True)
             cmd, fun, bun, won, gone, done, who = struct.unpack(cmd_fmt, packet)
             print("enable: ", cmd, "fun: ",  fun, "bun: ", bun, "won: ", won, "gone: ", gone, "done: ", done, "who: ", who)
@@ -118,7 +123,6 @@ def PID_threadspawner():
             print("Error sending data to LabVIEW:", e)
         finally:
             client_socket.close()
-    
     return
 
     # TODO: Implement thread spawner for PID control of two processes
