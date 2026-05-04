@@ -1,4 +1,5 @@
 from http import client
+import io
 
 import numpy as np
 import sys, time, struct, serial
@@ -46,7 +47,7 @@ MAG_KD = None
 # TCP Server Config (TX)
 HOST = socket.gethostbyname(socket.gethostname()) #
 print(HOST)
-TCP_PORT_RX = 6700 
+TCP_PORT_RX = 54709 
 TCP_RX = (HOST, TCP_PORT_RX)
 
 # TCP Client Config (RX)
@@ -59,11 +60,11 @@ COMMAND = 1
 LENGTH = 4
 
 # Struct format for packing/unpacking data
-struct_fmt = '>I?dd'  # Example: unsigned int, bool, double, double
+struct_fmt = '>bi2d?4d2?' # Example: byte, int, 2 doubles, bool, 4 doubles, 2 bools
 exp_length = struct.calcsize(struct_fmt)
 
 # Struct client commands
-cmd_fmt = '>bi2d?4d2?'  # Example: byte, int, 2 doubles, bool, 4 doubles, 2 bools
+cmd_fmt = '>bi4d?' # Example: byte, int, 4 doubles, bool
 cmd_length = struct.calcsize(cmd_fmt)
 
 # Shared Data
@@ -97,10 +98,28 @@ def TCP_server_thread(conn, addr):
 def PID_threadspawner():
 
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
+        print("Sending shit")
         client_socket.connect(TCP_TX)
-        while True:
-            # Send data to Labview
-            client_socket.sendall(struct.pack(cmd_fmt, 0b1, 0x10, 0, 0, 0b1, 0, 0, 0, 0, 0b1, 0b1))  # Send test data
+
+        # Send data to Labview
+        try:
+             # Example: byte, int, 2 doubles, bool, 4 doubles, 2 bools
+            packet = struct.pack(cmd_fmt, 0x10, 0x00000021, 0.0, 0.0, 0.0, 0.0, True)
+            cmd, fun, bun, won, gone, done, who = struct.unpack(cmd_fmt, packet)
+            print("enable: ", cmd, "fun: ",  fun, "bun: ", bun, "won: ", won, "gone: ", gone, "done: ", done, "who: ", who)
+            client_socket.sendall(packet)
+            ack = client_socket.recv(5)
+
+            ack2, frame_length = struct.unpack('>bi', ack)
+
+            if ack2 == cmd:
+                print("Received acknowledgment from LabVIEW:", ack2)
+        except Exception as e:
+            print("Error sending data to LabVIEW:", e)
+        finally:
+            client_socket.close()
+    
+    return
 
     # TODO: Implement thread spawner for PID control of two processes
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -215,6 +234,10 @@ def flow_rate(anode_flow, cathode_fraction = CATHODE_FRAC_NOMINAL):
 
     return anode_flow * safe_fraction
 
-def  main():
+if __name__ == "__main__":
 
-    return 0
+    PID_threadspawner()
+
+    print("PID control threads have completed execution.")
+
+    
