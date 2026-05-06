@@ -92,27 +92,6 @@ reader_lock = mp.Lock()
 writer_lock = mp.Lock()
 
 
-def TCP_server_thread(conn, addr):
-    with conn:
-        print('Connected by', addr)
-        while True:
-            dat = conn.recv(exp_length)
-            if not dat: break
-
-            header, en, v_lim, i_lim = struct.unpack(struct_fmt, dat)
-            print(f"Received header: {header}, enabled: {en}, voltage limit: {v_lim}, current limit: {i_lim}")
-
-            # cmd = conn.recv(COMMAND)
-            # if not cmd: break
-            # msg_cmd = cmd.decode('utf-8').strip()
-            # dat_len = conn.recv(LENGTH)
-            # if not dat_len: break
-            # msg_len = dat_len.decode('utf-8').strip()
-            # data = conn.recv(int(msg_len))
-            # if not data: break
-            # print(f"Received command: {msg_cmd}, data length: {msg_len}, data: {data}")
-
-
 # def Receive_Terminal_Input():
 #     while True:
 #         user_input = input("Enter current value (or 'exit' to quit): ")
@@ -199,16 +178,6 @@ def PID_threadspawner():
     # user_thread.join()
 
     return
-
-    # TODO: Implement thread spawner for PID control of two processes
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(TCP_RX)
-        s.listen(1)
-        conn, addr = s.accept()
-
-    # Start thread for packet send and receive
-    # reader_thread = mp.Process(target=TCP_server_thread, args=(conn, addr))
-    # reader_thread.start()
     
     # Start thread for discharge current controls
     # discharge_current_thread = mp.Process(target=PID_discharge_current, args=(...)) # TODO: Fill in arguments
@@ -218,7 +187,6 @@ def PID_threadspawner():
     # magnetic_coil_thread = mp.Process(target=PID_magnetic_coil_current, args=(...)) # TODO: Fill in arguments
     # magnetic_coil_thread.start()
 
-    # reader_thread.join()
     # discharge_current_thread.join()
     # magnetic_coil_thread.join()
 
