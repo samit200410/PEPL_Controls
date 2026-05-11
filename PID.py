@@ -6,9 +6,10 @@ import sys, time, struct, serial
 import multiprocessing as mp
 import socket
 
+
+# Global Variables
 # ----------------------------
 # Safety Limites
-
 VOLTAGE_MIN = 200.0
 VOLTAGE_MAX = 300.0
 POWER_TARGET = 2000.0
@@ -28,6 +29,7 @@ CATHODE_FRAC_MAX = 0.10
 # ----------------------------
 
 
+
 # ----------------------------
 # PID Turning
 
@@ -41,6 +43,23 @@ MAG_KP = None
 MAG_KI = None
 MAG_KD = None
 # ----------------------------
+
+
+
+# --------------------------------------------
+# Global shared variables for PID control
+SETPOINT_FILE = "desired_current_setpoints.txt"
+DEFAULT_DESIRED_CURRENT = 4.0
+last_valid_desired_current = DEFAULT_DESIRED_CURRENT 
+# tbd_current_vals = [10.0, 5.0, 13.0]
+
+user_flag = False
+measured_current = 0.0
+nominal_flow = 5.0
+integral_error_flow = 0.0
+previous_error_flow = 0.0
+dt = 0.5
+# --------------------------------------------
 
 
 
@@ -70,16 +89,6 @@ cmd_fmt = '>bi4d?'                  # Example: byte, int, 4 doubles, bool
 cmd_length = struct.calcsize(cmd_fmt)
 print("Command Packet Length: ", cmd_length)
 
-# Global shared variables for PID control
-user_flag = False
-measured_current = 0.0
-desired_current_value = 4.0
-tbd_current_vals = [10.0, 5.0, 13.0]
-nominal_flow = 5.0
-integral_error_flow = 0.0
-previous_error_flow = 0.0
-dt = 0.5
-
 # Commands
 CMD_GET_DATA = 0x11
 CMD_SET_DATA = 0x10
@@ -92,6 +101,27 @@ reader_lock = mp.Lock()
 writer_lock = mp.Lock()
 
 
+# def TCP_server_thread(conn, addr):
+#     with conn:
+#         print('Connected by', addr)
+#         while True:
+#             dat = conn.recv(exp_length)
+#             if not dat: break
+
+#             header, en, v_lim, i_lim = struct.unpack(struct_fmt, dat)
+#             print(f"Received header: {header}, enabled: {en}, voltage limit: {v_lim}, current limit: {i_lim}")
+
+#             # cmd = conn.recv(COMMAND)
+#             # if not cmd: break
+#             # msg_cmd = cmd.decode('utf-8').strip()
+#             # dat_len = conn.recv(LENGTH)
+#             # if not dat_len: break
+#             # msg_len = dat_len.decode('utf-8').strip()
+#             # data = conn.recv(int(msg_len))
+#             # if not data: break
+#             # print(f"Received command: {msg_cmd}, data length: {msg_len}, data: {data}")
+
+
 # def Receive_Terminal_Input():
 #     while True:
 #         user_input = input("Enter current value (or 'exit' to quit): ")
@@ -102,8 +132,39 @@ writer_lock = mp.Lock()
 #             global new_desired_current_value
 #             new_desired_current_value = float(user_input)
 #             user_flag = True
-            
+
+def read_desired_setpoints(filename, last_value):
+    try:
+        with open(filename,'r') as file:
+            text = file.read().strip()
+
+            if text == "":
+                print("Setpoint file is EMPTY. Using last known setpoint: ", last_value)
+                return last_value
         
+            new_value = float(text)
+
+            if new_value < 0:
+                print("Setpoint value cannot be negative. Using last known setpoint: ", last_value)
+                return last_value
+            
+            return new_value
+        
+    except FileNotFoundError:
+        print(f"Setpoint file '{filename}' not found. Creating file with defalt value: {last_value} A.")
+        with open(filename, 'w') as file:
+            file.write(str(last_value))
+        return last_value
+    
+    except ValueError:
+        print("Invalid spetpoint file contents. Using last known setpoint: ", last_value)
+        return last_value
+    
+    except Exception as e:
+        print("Error reading setpoint file: ", e)
+        print("Using last known setpoint: ", last_value)
+        return last_value
+    
 
 def PID_threadspawner():
 
@@ -122,16 +183,21 @@ def PID_threadspawner():
             print("Connection to LabVIEW timed out. Please check the connection and try again.")
             return
 
-        # Send data to Labview
+        # Communicate with LabVIEW
         try:
+            
             count = 0
+            
             while True:
-                idx = int(count / 15)
+                
+                # idx = int(count / 15)
+                
                 # global user_flag
                 # if user_flag:
                 #     global desired_current_value
                 #     desired_current_value = new_desired_current_value
                 #     user_flag = False
+
                 # 1) Get = command 17 --> Structure: byte, int, 2 doubles, bool, 4 doubles, 2 bools
                 print("Requesting data from LabVIEW...")
                 packet = struct.pack('>bi', CMD_GET_DATA, 0x00000000)
@@ -147,9 +213,18 @@ def PID_threadspawner():
                     print("Voltage exceeds safe threshold! Initiating shutdown...")
                     shutdown = True
 
-                # measured_current = current
-                global integral_error_flow, previous_error_flow
-                flow_control, integral_error_flow, previous_error_flow = PID_discharge_current(measured_current, tbd_current_vals[idx], nominal_flow, integral_error_flow, previous_error_flow, dt)
+                
+                # Implement PID
+                global integral_error_flow, previous_error_flow, last_valid_desired_current
+                measured_current = current
+
+                desired_current = read_desired_setpoints(SETPOINT_FILE, last_valid_desired_current)
+                last_valid_desired_current = desired_current
+
+                print("Measured Current: ", measured_current)
+                print("Desired Current: ", desired_current)
+                
+                flow_control, integral_error_flow, previous_error_flow = PID_discharge_current(measured_current, desired_current, nominal_flow, integral_error_flow, previous_error_flow, dt)
                 print("Computed flow control: ", flow_control, "\nIntegral Error: ", integral_error_flow, "\nPrevious Error: ", previous_error_flow)
                 
 
@@ -170,7 +245,7 @@ def PID_threadspawner():
                 time.sleep(0.5)
             
     
-        except Exception as e:
+        except Exception as e:  
             print("Generic Error:", e)
         finally:
             client_socket.close()
