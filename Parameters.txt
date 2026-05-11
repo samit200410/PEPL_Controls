@@ -1,3 +1,2 @@
-Voltage Limit Double
-Current Limit Double
-Enable Boolean
+cmd 16 - Set
+smd 17 - Get
