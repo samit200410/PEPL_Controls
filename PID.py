@@ -101,27 +101,6 @@ reader_lock = mp.Lock()
 writer_lock = mp.Lock()
 
 
-# def TCP_server_thread(conn, addr):
-#     with conn:
-#         print('Connected by', addr)
-#         while True:
-#             dat = conn.recv(exp_length)
-#             if not dat: break
-
-#             header, en, v_lim, i_lim = struct.unpack(struct_fmt, dat)
-#             print(f"Received header: {header}, enabled: {en}, voltage limit: {v_lim}, current limit: {i_lim}")
-
-#             # cmd = conn.recv(COMMAND)
-#             # if not cmd: break
-#             # msg_cmd = cmd.decode('utf-8').strip()
-#             # dat_len = conn.recv(LENGTH)
-#             # if not dat_len: break
-#             # msg_len = dat_len.decode('utf-8').strip()
-#             # data = conn.recv(int(msg_len))
-#             # if not data: break
-#             # print(f"Received command: {msg_cmd}, data length: {msg_len}, data: {data}")
-
-
 # def Receive_Terminal_Input():
 #     while True:
 #         user_input = input("Enter current value (or 'exit' to quit): ")
