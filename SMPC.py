@@ -1,352 +1,207 @@
-# Diffusion-Informed Scenario-Based SMPC for Hall Thruster Control
+# Simulation imports
+import numpy as np
+from scipy.integrate import solve_ivp
 
-class DiffusionInformedSMPCController:
-    def __init__(self):
+# Controller imports
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+import matplotlib.pyplot as plt
+from scipy.linalg import block_diag
+from scipy.optimize import minimize
+from scipy.stats import multivariate_normal
+from casadi import *
+
+# ==========================================
+# CONSTANTS
+# ==========================================
+g = 9.81 # gravity (m/s^2)
+
+@dataclass
+class CartPoleNominal:
+    m_c_nom: float = 1.0    # (kg)
+    m_p_nom: float = 0.1    # (kg)
+    l_nom: float = 0.5      # (m)
+
+@dataclass
+class ScenarioParams:
+    m_c: float
+    m_p: float
+    l: float
+
+# Take samples from gaussian distribution for each parameter to stochastisize the MPC
+def sample_Scenarios(
+    nominal: CartPoleNominal,
+    ParamSpread: Dict[str, List[float, float]] | None = None,
+    num_samples: int
+) -> List[ScenarioParams]:
+
+    scenarios: List[ScenarioParams] = []
+
+    if ParamSpread is None:
+        ParamSpread = {
+            "cart_mass_mean": 1.0,
+            "cart_mass_var": 0.25,
+            "pole_mass_mean": 0.1,
+            "pole_mass_var": 0.025,
+            "length_mean": 0.5,
+            "length_var": 0.0001    # maybe its a little stretchy or smth
+        }
+    
+    cart_dist = multivariate_normal(ParamSpread["cart_mass_mean"], ParamSpread["cart_mass_var"])
+    pole_dist = multivariate_normal(ParamSpread["pole_mass_mean"], ParamSpread["pole_mass_var"])
+    length_dist = multivariate_normal(ParamSpread["length_mean"], ParamSpread["length_var"])
+
+    for i in range(num_samples):
+        scenarios.append(
+            ScenarioParams(
+                m_c = cart_dist.rvs(1), 
+                m_p = pole_dist.rvs(1),
+                l = length_dist.rvs(1)
+            )
+        )
+
+    return scenarios
+
+class CartPole:
+    def __init__(self, m_c=1.0, m_p=0.1, l=0.5, g=9.81):
+        """
+        Initializes the Cart-Pole continuous-time simulation.
         
-        #######################################################################
-        # CONTROLLER DESIGN PARAMETERS (TO BE DEFINED)
-        #######################################################################
-
-        self.dt_ctrl = None        # Controller update period
-        self.N = None              # Prediction horizon length
-        self.S = None              # Number of diffusion samples/scenarios
-
-        #######################################################################
-        # COST FUNCTION WEIGHTS (TO BE TUNED)
-        #######################################################################
-        self.Q = {
-            "i_avg_tracking": None,
-            "i_rms_tracking": None,
-            "terminal_i_avg": None,
-            "terminal_i_rms": None
-        }
-
-        self.R = {
-            "m_cmd_effort": None,
-            "i_coil_effort": None,
-            "delta_u": None
-        }
-
-        #######################################################################
-        # TARGET OPERATING POINT
-        #######################################################################
-        self.targets = {
-            "i_avg": None,
-            "i_rms": None
-        }
-
-        #######################################################################
-        # ACTUATOR CONSTRAINTS
-        #######################################################################
-        self.U = {
-            "m_cmd_min": None,
-            "m_cmd_max": None,
-            "i_coil_min": None,
-            "i_coil_max": None
-        }
-
-        #######################################################################
-        # STATE / SAFETY CONSTRAINTS
-        #######################################################################
-        self.G = {
-            "i_avg_min": None,
-            "i_avg_max": None,
-            "i_rms_min": None,
-            "i_rms_max": None
-        }
-
-        #######################################################################
-        # INITIAL CONDITIONS (PLACEHOLDERS)
-        #######################################################################
-        self.u_prev = {
-            "m_cmd": None,
-            "i_coil": None
-        }
-
-        self.x_prev = {
-            "i_avg": None,
-            "i_rms": None,
-            "delta_b": None,
-            "m_act": None
-        }
-
-    ###########################################################################
-    # STEP 1: ACQUIRE DAQ DATA
-    ###########################################################################
-    def acquire_daq_data(self):
-        raw_packet = {
-            "timestamp": None,
-            "discharge_current_signal": None,
-            "coil_current_measured": None,
-            "flow_measured": None,
-            "voltage_measured": None
-        }
-        return raw_packet
-
-    ###########################################################################
-    # STEP 1.2: PREPROCESS DATA
-    ###########################################################################
-    def preprocess_daq_data(self, raw_packet):
-        observation_packet = {
-            "timestamp": raw_packet["timestamp"],
-            "i_avg_measured": None,
-            "i_rms_measured": None,
-            "coil_current_measured": raw_packet["coil_current_measured"],
-            "flow_measured": raw_packet["flow_measured"],
-            "voltage_measured": raw_packet["voltage_measured"]
-        }
-        return observation_packet
-
-    ###########################################################################
-    # STEP 2: DIFFUSION MODEL ESTIMATION
-    ###########################################################################
-    def run_diffusion_estimator(self, observation_packet):
-
-        posterior_samples = []
-
-        for s in range(self.S):
-            sample = {
-                "x": {
-                    "i_avg": None,
-                    "i_rms": None,
-                    "delta_b": None,
-                    "m_act": None
-                },
-                "theta": {
-                    # Optional uncertain parameters
-                    # "beta_m": None,
-                    # "beta_b": None,
-                    # "tau_m": None
-                }
-            }
-            posterior_samples.append(sample)
-
-        return posterior_samples
-
-    ###########################################################################
-    # OPTIONAL: POSTERIOR VALIDATION
-    ###########################################################################
-    def summarize_and_validate_posterior(self, posterior_samples):
-        summary = {
-            "posterior_mean": None,
-            "posterior_covariance": None,
-            "warning_large_spread": None,
-            "warning_nonphysical_sample_found": None
-        }
-        return summary
-
-    ###########################################################################
-    # REDUCED DYNAMICS MODEL (TO BE DEFINED)
-    ###########################################################################
-    def reduced_dynamics(self, x, u, theta):
-
-        # Extract variables
-        i_avg = x["i_avg"]
-        i_rms = x["i_rms"]
-        delta_b = x["delta_b"]
-        m_act = x["m_act"]
-
-        m_cmd = u["m_cmd"]
-        i_coil = u["i_coil"]
-
-        # Placeholder model (must be replaced with real equations)
-        x_next = {
-            "i_avg": None,
-            "i_rms": None,
-            "delta_b": None,
-            "m_act": None
-        }
-
-        return x_next
-
-    ###########################################################################
-    # STAGE COST
-    ###########################################################################
-    def compute_stage_cost(self, x, u, u_last):
-
-        cost = 0.0
-
-        # Tracking penalties
-        cost += self.Q["i_avg_tracking"] * (x["i_avg"] - self.targets["i_avg"])**2
-        cost += self.Q["i_rms_tracking"] * (x["i_rms"] - self.targets["i_rms"])**2
-
-        # Control effort penalties
-        cost += self.R["m_cmd_effort"] * (u["m_cmd"]**2)
-        cost += self.R["i_coil_effort"] * (u["i_coil"]**2)
-
-        # Input change penalty
-        delta_m = u["m_cmd"] - u_last["m_cmd"]
-        delta_i = u["i_coil"] - u_last["i_coil"]
-        cost += self.R["delta_u"] * (delta_m**2 + delta_i**2)
-
-        # Soft safety penalties (structure only)
-        # Example:
-        # if x["i_avg"] > self.G["i_avg_max"]:
-        #     cost += large_penalty
-
-        return cost
-
-    ###########################################################################
-    # TERMINAL COST
-    ###########################################################################
-    def compute_terminal_cost(self, x_terminal):
-
-        cost = 0.0
-        cost += self.Q["terminal_i_avg"] * (
-            x_terminal["i_avg"] - self.targets["i_avg"]
-        )**2
-
-        cost += self.Q["terminal_i_rms"] * (
-            x_terminal["i_rms"] - self.targets["i_rms"]
-        )**2
-
-        return cost
-
-    ###########################################################################
-    # EVALUATE CONTROL SEQUENCE (CORE SMPC LOGIC)
-    ###########################################################################
-    def evaluate_control_sequence(self, U_sequence, posterior_samples):
-
-        total_cost = 0.0
-
-        for sample in posterior_samples:
-            x = sample["x"]
-            theta = sample["theta"]
-
-            scenario_cost = 0.0
-            u_last = self.u_prev
-
-            for j in range(self.N):
-                u = U_sequence[j]
-
-                scenario_cost += self.compute_stage_cost(x, u, u_last)
-
-                x = self.reduced_dynamics(x, u, theta)
-
-                u_last = u
-
-            scenario_cost += self.compute_terminal_cost(x)
-
-            total_cost += scenario_cost
-
-        total_cost = total_cost / len(posterior_samples)
-
-        return total_cost
-
-    ###########################################################################
-    # INPUT CONSTRAINT CHECK
-    ###########################################################################
-    def input_within_bounds(self, u):
-
-        if not (self.U["m_cmd_min"] <= u["m_cmd"] <= self.U["m_cmd_max"]):
-            return False
-
-        if not (self.U["i_coil_min"] <= u["i_coil"] <= self.U["i_coil_max"]):
-            return False
-
-        return True
-
-    ###########################################################################
-    # SOLVE SMPC
-    ###########################################################################
-    def solve_smpc(self, posterior_samples):
-
-        best_sequence = None
-        best_cost = float("inf")
-        success = False
-
-        candidate_sequences = self.generate_candidate_control_sequences()
-
-        for U_sequence in candidate_sequences:
-
-            feasible = True
-            for u in U_sequence:
-                if not self.input_within_bounds(u):
-                    feasible = False
-                    break
-
-            if not feasible:
-                continue
-
-            cost = self.evaluate_control_sequence(U_sequence, posterior_samples)
-
-            if cost < best_cost:
-                best_cost = cost
-                best_sequence = U_sequence
-                success = True
-
-        return best_sequence, success
-
-    ###########################################################################
-    # PLACEHOLDER - CONTROL GENERATOR
-    ###########################################################################
-    def generate_candidate_control_sequences(self):
-
-        candidate_sequences = []
-
-        # Placeholder: must be replaced with optimizer
-        for _ in range(None):  # Replace with meaningful iteration
-            U_sequence = []
-            for _ in range(self.N):
-                U_sequence.append({
-                    "m_cmd": None,
-                    "i_coil": None
-                })
-            candidate_sequences.append(U_sequence)
-
-        return candidate_sequences
-
-    ###########################################################################
-    # APPLY CONTROL
-    ###########################################################################
-    def apply_control(self, u_k):
-        pass
-
-    ###########################################################################
-    # FALLBACK CONTROL
-    ###########################################################################
-    def get_fallback_control(self):
-        return self.u_prev
-
-    ###########################################################################
-    # MAIN CONTROL
-    ###########################################################################
-    def run_one_control_step(self, k):
-
-        raw_packet = self.acquire_daq_data()
-        observation_packet = self.preprocess_daq_data(raw_packet)
-
-        posterior_samples = self.run_diffusion_estimator(observation_packet)
-
-        posterior_summary = self.summarize_and_validate_posterior(posterior_samples)
-
-        best_sequence, success = self.solve_smpc(posterior_samples)
-
-        if success:
-            u_k = best_sequence[0]
+        Parameters:
+        m_c (float): Mass of the cart (kg)
+        m_p (float): Mass of the pole (point mass at the end) (kg)
+        l (float): Length of the pole (m)
+        g (float): Gravity acceleration (m/s^2)
+        """
+        self.m_c = m_c
+        self.m_p = m_p
+        self.l = l
+        self.g = g
+        
+        # State vector: [x, x_dot, theta, theta_dot]
+        # Convention: theta = 0 is perfectly upright (unstable equilibrium). 
+        # Positive x is to the right, positive theta is clockwise.
+        self.state = np.zeros(4)
+        self.time = 0.0
+
+    def reset(self, initial_state=None):
+        """Resets the state of the cart-pole to the given initial state or to zeros."""
+        if initial_state is not None:
+            self.state = np.array(initial_state, dtype=float)
         else:
-            u_k = self.get_fallback_control()
+            self.state = np.zeros(4)
+        self.time = 0.0
+        return self.state
 
-        self.apply_control(u_k)
+    def _dynamics(self, t, state, u):
+        """
+        The non-linear equations of motion for the cart-pole system.
+        Designed to be called by scipy's ODE solver.
+        """
+        x, x_dot, theta, theta_dot = state
+        
+        # Pre-compute trigonometric values
+        sin_theta = np.sin(theta)
+        cos_theta = np.cos(theta)
+        
+        # Total mass
+        total_m = self.m_c + self.m_p
+        
+        # Calculate angular acceleration of the pole (theta_dot_dot)
+        # Using the standard point-mass cart-pole derivation
+        temp = (u + self.m_p * self.l * theta_dot**2 * sin_theta) / total_m
+        theta_dot_dot = (self.g * sin_theta - cos_theta * temp) / \
+            (self.l * (1.0 - (self.m_p * cos_theta**2) / total_m))
+            
+        # Calculate linear acceleration of the cart (x_dot_dot)
+        x_dot_dot = temp - (self.m_p * self.l * theta_dot_dot * cos_theta) / total_m
+        
+        # Return the derivatives of the state: [x_dot, x_dot_dot, theta_dot, theta_dot_dot]
+        return [x_dot, x_dot_dot, theta_dot, theta_dot_dot]
 
-        self.u_prev = u_k
+    def step(self, u, dt):
+        """
+        Steps the simulation forward by `dt` seconds applying control force `u`.
+        
+        Parameters:
+        u (float): The control force applied to the cart in Newtons.
+        dt (float): The duration of the control step in seconds.
+        
+        Returns:
+        state (np.ndarray): The new state of the system after dt.
+        """
+        # We use solve_ivp to accurately integrate the continuous-time dynamics
+        # over the interval [0, dt], holding the control `u` constant.
+        res = solve_ivp(
+            fun=lambda t, y: self._dynamics(t, y, u),
+            t_span=(0, dt),
+            y0=self.state,
+            method='RK45' # Runge-Kutta 4(5) continuous time solver
+        )
+        
+        # Update internal state with the results at the end of the integration window
+        self.state = res.y[:, -1]
+        self.time += dt
+        
+        return self.state
 
-        return {
-            "step_index": k,
-            "u_applied": u_k,
-            "success": success
-        }
+
+class SMPC_Controller:
+    def __init__(self, S: int, N: int, dt: float):
+        """
+        Initializes the SMPC Controller object.
+        
+        Parameters:
+        S (int): Number of sampled scenarios
+        N (int): Number of horizon steps
+        dt (float): time step (s)
+        """
+        self.S = S
+        self.N = N
+        self.dt = dt
+
+        self.x = vertcat(   MX.sym("x"), 
+                            MX.sym("x_dot"),
+                            MX.sym("theta"),
+                            MX.sym("theta_dot"))
+        
+        self.u = MX.sym("F")
+
+        self.A_mat = vertcat(
+                horzcat(0, 1, 0, 0),
+                horzcat(0, 0, m*g/M, 0),
+                horzcat(0, 0, 0, 1),
+                horzcat(0, 0, g*(M + m)/(M*l), 0),
+        )
 
 
-###############################################################################
-# DRIVER
-###############################################################################
-def main():
-    controller = DiffusionInformedSMPCController()
+        
 
-    for k in range(None):  # Replace with actual runtime condition
-        controller.run_one_control_step(k)
-
-
+# ==========================================
+# Example Usage
+# ==========================================
 if __name__ == "__main__":
-    main()
+    # 1. Initialize the system
+    env = CartPole()
+    
+    # 2. Reset to a specific state: [x=0, x_dot=0, theta=0.1 rad, theta_dot=0]
+    # (Slightly tilted off the unstable upright equilibrium)
+    current_state = env.reset([0.0, 0.0, 0.1, 0.0])
+    
+    # 3. Simulate a control loop running at 50 Hz (dt = 0.02s)
+    dt = 0.02
+    simulation_duration = 2.0 # Simulate 2 seconds total
+    num_steps = int(simulation_duration / dt)
+    
+    print("Initial state:", current_state)
+    
+    for step_idx in range(num_steps):
+        # --- Control Algorithm Placeholder ---
+        # Here is where you would calculate `u` based on the current_state.
+        # For this example, let's just apply 0 force to watch the pole fall.
+        u = 0.0 
+        
+        # Step the continuous-time physics forward
+        current_state = env.step(u, dt)
+        
+    print(f"State after {simulation_duration}s of 0 force:", current_state)
