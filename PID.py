@@ -287,7 +287,7 @@ def PID_discharge_current(measured_current, desired_current, nominal_flow,
     return flow_control, integral_error, previous_error
 
 
-
+# MAGNETIC COIL CURRENT CONTROL NOT IMPLEMENTED YET
 def PID_magnetic_coil_current(measured_oscillation, desired_oscillation, nominal_coil_current,
                               integral_error, previous_error, dt):
     # TODO: Implement Testbench and tune variables
@@ -328,6 +328,8 @@ def PID_magnetic_coil_current(measured_oscillation, desired_oscillation, nominal
 
     return coil_command, integral_error, previous_error, error
 
+
+# Utility Functions: Not tuned to specific values yet, just general structure for safety clamping and conversions
 def clamp(value, min_value, max_value):
     return(max(min(value, max_value), min_value))
 
@@ -338,6 +340,8 @@ def desired_current(voltage, POWER_TARGET):
 def flow_rate(anode_flow, cathode_fraction = CATHODE_FRAC_NOMINAL):
     safe_fraction = clamp(cathode_fraction, CATHODE_FRAC_MIN, CATHODE_FRAC_MAX)
     return anode_flow * safe_fraction
+
+
 
 if __name__ == "__main__":
 
