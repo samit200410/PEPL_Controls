@@ -165,7 +165,7 @@ def PID_threadspawner():
         # Communicate with LabVIEW
         try:
             
-            count = 0
+            # count = 0
             
             while True:
                 
@@ -193,7 +193,7 @@ def PID_threadspawner():
                     shutdown = True
 
                 
-                # Implement PID
+                # Implement PID -->
                 global integral_error_flow, previous_error_flow, last_valid_desired_current
                 measured_current = current
 
@@ -207,7 +207,6 @@ def PID_threadspawner():
                 print("Computed flow control: ", flow_control, "\nIntegral Error: ", integral_error_flow, "\nPrevious Error: ", previous_error_flow)
                 
 
-
                 # 2) Set = command 16 --> Structure: byte, int, 4 doubles, bool
                 # CMD, length, voltage_lim, current_lim, voltage_trp, current_trp, enable
                 print("\nSending data to LabVIEW...")
@@ -219,7 +218,7 @@ def PID_threadspawner():
                 cmd, length = struct.unpack('>bi', ack)
                 print("cmd: ", cmd, "\nlength: ", length)
 
-                count += 1
+                # count += 1
                 
                 time.sleep(0.5)
             
@@ -285,6 +284,7 @@ def PID_discharge_current(measured_current, desired_current, nominal_flow,
         flow_control = nominal_flow
 
     return flow_control, integral_error, previous_error
+
 
 
 # MAGNETIC COIL CURRENT CONTROL NOT IMPLEMENTED YET
