@@ -169,7 +169,7 @@ class CartPole:
 
 
 class SMPC_Controller:
-    def __init__(self, S: int, N: int, dt: float):
+    def __init__(self, S: int, N: int, dt: float, nominal: CartPoleNominal):
         """
         Initializes the SMPC Controller object.
         
@@ -178,23 +178,33 @@ class SMPC_Controller:
         N (int): Number of horizon steps
         dt (float): time step (s)
         """
+        
         self.S = S
         self.N = N
         self.dt = dt
+        self.nominal = nominal
+
+        m_c = nominal.m_c_nom
+        m_p = nominal.m_p_nom
+        l = nominal.l_nom
+
 
         self.x = vertcat(   MX.sym("x"), 
                             MX.sym("x_dot"),
                             MX.sym("theta"),
-                            MX.sym("theta_dot"))
+                            MX.sym("theta_dot")
+                        )
         
         self.u = MX.sym("F")
 
         self.A_mat = vertcat(
                 horzcat(0, 1, 0, 0),
-                horzcat(0, 0, m*g/M, 0),
+                horzcat(0, 0, m_p * g / m_c, 0),
                 horzcat(0, 0, 0, 1),
-                horzcat(0, 0, g*(M + m)/(M*l), 0),
+                horzcat(0, 0, (g *(m_p + m_c)/(m_c * l)), 0),
         )
+
+        
 
 
         
@@ -221,7 +231,8 @@ if __name__ == "__main__":
         # --- Control Algorithm Placeholder ---
         # Here is where you would calculate `u` based on the current_state.
         # For this example, let's just apply 0 force to watch the pole fall.
-        u = 0.0 
+        u = controller.compute_control(current_state)
+        current_state = env.step(u, dt)
         
         # Step the continuous-time physics forward
         current_state = env.step(u, dt)
