@@ -1,53 +1,44 @@
 from http import client
 import io
 
-import numpy as np
-import sys, time, struct, serial
+from dataclasses import dataclass, asdict
 import multiprocessing as mp
+import numpy as np
+import sys, struct, serial, time
 import socket
 
 
 # Global Variables
-# ----------------------------
-# Safety Limites
-VOLTAGE_MIN = 200.0
-VOLTAGE_MAX = 300.0
-POWER_TARGET = 2000.0
 
-INNER_MAG_MIN = 3.5
-INNER_MAG_MAX = 6.0
+# ________________________________________________________
+# Communication variables
 
-OUTER_MAG_MIN = 4.0
-OUTER_MAG_MAX = 7.5
-
-ANODE_FLOW_MIN = 0.0 # 60.0
-ANODE_FLOW_MAX = 120.0
-
-CATHODE_FRAC_MIN = 0.05
-CATHODE_FRAC_NOMINAL = 0.07
-CATHODE_FRAC_MAX = 0.10
-# ----------------------------
+# TCP Client Configuration (RX)
+LABVIEW_IP = '10.0.0.1'
+TCP_PORT_TX = 59704                                 # Set this to actual TCP port for receiving data from LabView
+TCP_TX = (LABVIEW_IP, TCP_PORT_TX)
 
 
+SEND_EMPTY_ARG = True
 
-# ----------------------------
-# PID Turning
+HEADER_FMT = '>bi'                                  # Example: byte, int
+HEADER_LENGTH = struct.calcsize(HEADER_FMT)
 
-# Mass Flow
-FLOW_KP = 0.5
-FLOW_KI = 0.0
-FLOW_KD = 0.0
+# Command Constants
+CMD_MAGNA_GET_READINGS = 0x12                       # Command 18
+CMD_MAGNA_SET_CONTROL = 0x13                        # Command 19
 
-# Magnetic Field
-MAG_KP = None
-MAG_KI = None
-MAG_KD = None
-# ----------------------------
+CMD_ALICAT_GET_READINGS = 0x1B                      # Command 27
+CMD_ALICAT_SET_CONTROL = 0x1C                       # Command 28
+
+CMD_LAMBDA_GET_READINGS = 0x23                      # Command 35
+CMD_LAMBDA_SET_CONTROL = 0x24                       # Command 36
+# ________________________________________________________
 
 
+# ________________________________________________________
+# Shared variables for PID control
 
-# --------------------------------------------
-# Global shared variables for PID control
 SETPOINT_FILE = "desired_current_setpoints.txt"
 DEFAULT_DESIRED_CURRENT = 4.0
 last_valid_desired_current = DEFAULT_DESIRED_CURRENT 
@@ -59,39 +50,192 @@ nominal_flow = 5.0
 integral_error_flow = 0.0
 previous_error_flow = 0.0
 dt = 0.5
-# --------------------------------------------
+# ________________________________________________________
+
+
+
+# Data Structures 
+
+@dataclass
+class MagnaReadings:
+    voltage: float
+    current: float
+    enabled: bool
+    voltage_limit: float
+    current_limit: float
+    overvoltage_trip: float
+    overcurrent_trip: float
+    local_control: bool
+    alarm: bool
+
+@dataclass
+class MagnaControl:
+    voltage_limit: float
+    current_limit: float
+    overvoltage_trip: float
+    overcurrent_trip: float
+    enable: bool
+
+@dataclass
+class AlicatReadings:
+    label: str
+    gas: str
+    setpoint: float
+    setpoint_units: str
+    mass_flow: float
+    mass_flow_units: str
+    pressure: float
+    pressure_units: str
+    temperature: float
+    termperature_units: str
+    volume_flow: float
+    volume_flow_units: str
+    valve_hold: bool
+
+@dataclass
+class AlicatControl:
+    label: str
+    setpoint: float
+    units: str
+    loop_control_variable: int=0            # U16 ENUM: 0 = Mass Flow, 1 = | Pressure |, 2 = Volume Flow
+    valve_hold: bool = False
+
+@dataclass
+class LambdaReadings:
+    label: str
+    voltage: float
+    current: float
+    enable: bool
+    voltage_limit: float
+    current_limit: float
+    overvoltage_protection: float
+    remote_mode: int                        # U8 ENUM: 0 = Local, 1 = Remote, 2 = Local Lockout
+    fault: bool
+
+@dataclass
+class LambdaControl:
+    label: str
+    voltage_limit: float
+    current_limit: float
+    overvoltage_protection: float
+    enable: bool = False
+
+@dataclass
+class ManualControl:
+    magna_supplies: MagnaControl
+    alicat_supplies: list[AlicatControl]
+    lambda_supplies: list[LambdaControl]
+    send_magna: bool = True
+    send_alicat: bool = True
+    send_lambda: bool = True
+
+@dataclass
+class PIDControl:
+    kp: float
+    ki: float
+    kd: float
+    output_min: float
+    output_max: float
+    integral_min: float
+    integral_max: float
+
+    integral: float = 0.0
+    previous_error: float = 0.0
+    first_call: bool = True
+
+    def update(self, setpoint: float, measurement: float, nominal_output: float, dt: float) -> float:
+        error = setpoint - measurement
+
+        self.integral += error * dt
+        self.integral = clamp(self.integral, self.integral_min, self.integral_max)
+
+        if self.first_call:
+            derivative = 0.0
+            self.first_call = False
+        else:
+            derivative = (error - self.previous_error) / dt
+
+        correction = (
+            self.kp * error
+            + self.ki * self.integral
+            + self.kd * derivative
+        )
+
+        output = nominal_output + correction
+        output = clamp(output, self.output_min, self.output_max)
+
+        self.previous_error = error
+        return output
+
+
+def clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min(value, max_value), min_value)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
 # TCP Server Configuration (TX)
-HOST = socket.gethostbyname(socket.gethostname()) #
+HOST = socket.gethostbyname(socket.gethostname()) 
 print("Host IP: ", HOST)
-TCP_PORT_RX = 54709         # Set this to actual TCP port for transmitting data to LabView
+TCP_PORT_RX = 54709                                 # Set this to actual TCP port for transmitting data to LabView
 TCP_RX = (HOST, TCP_PORT_RX)
 
-# TCP Client Configuration (RX)
-LABVIEW_IP = '10.0.0.1'
-TCP_PORT_TX = 59704         # Set this to actual TCP port for receiving data from LabView
-TCP_TX = (LABVIEW_IP, TCP_PORT_TX)
+
 
 # Message Protocol Constants
 HEADER = 4
 COMMAND = 1  
 LENGTH = 4
 
+# Command Constants
+MAGNA_FETCH = 0x10                                  # Command 16
+MAGNA_SET = 0x10                                    # Command 17
+
 # Struct format for packing/unpacking data --> Big-Endian Order
-struct_fmt = '>bi2d?4d2?'           # Example: byte, int, 2 doubles, bool, 4 doubles, 2 bools
+struct_fmt = '>bi2d?4d2?'                           # Example: byte, int, 2 doubles, bool, 4 doubles, 2 bools
 exp_length = struct.calcsize(struct_fmt)
 print("Expected Packet Length: ", exp_length)
 
 # Struct client commands --> Big-Endian Order
-cmd_fmt = '>bi4d?'                  # Example: byte, int, 4 doubles, bool
+cmd_fmt = '>bi4d?'                                  # Example: byte, int, 4 doubles, bool
 cmd_length = struct.calcsize(cmd_fmt)
 print("Command Packet Length: ", cmd_length)
 
-# Commands
-CMD_GET_DATA = 0x11
-CMD_SET_DATA = 0x10
+
 
 # Shared Data
 latest_packet = None
@@ -112,6 +256,8 @@ writer_lock = mp.Lock()
 #             new_desired_current_value = float(user_input)
 #             user_flag = True
 
+
+# Reads desired setpoints from file
 def read_desired_setpoints(filename, last_value):
     try:
         with open(filename,'r') as file:
@@ -145,6 +291,7 @@ def read_desired_setpoints(filename, last_value):
         return last_value
     
 
+
 def PID_threadspawner():
 
     # user_thread = mp.Process(target=Receive_Terminal_Input)
@@ -165,18 +312,9 @@ def PID_threadspawner():
         # Communicate with LabVIEW
         try:
             
-            # count = 0
             
             while True:
                 
-                # idx = int(count / 15)
-                
-                # global user_flag
-                # if user_flag:
-                #     global desired_current_value
-                #     desired_current_value = new_desired_current_value
-                #     user_flag = False
-
                 # 1) Get = command 17 --> Structure: byte, int, 2 doubles, bool, 4 doubles, 2 bools
                 print("Requesting data from LabVIEW...")
                 packet = struct.pack('>bi', CMD_GET_DATA, 0x00000000)
@@ -193,7 +331,7 @@ def PID_threadspawner():
                     shutdown = True
 
                 
-                # Implement PID -->
+                # Implement PID
                 global integral_error_flow, previous_error_flow, last_valid_desired_current
                 measured_current = current
 
@@ -248,10 +386,7 @@ def PID_threadspawner():
 def PID_discharge_current(measured_current, desired_current, nominal_flow,
                           integral_error, previous_error, dt):
     
-    # TODO: Implement Testbench and tune variables
-
     # PID Variable Gains 
-    # TODO: Make these global if they won't change
     Kp = FLOW_KP
     Ki = FLOW_KI
     Kd = FLOW_KD
@@ -279,6 +414,7 @@ def PID_discharge_current(measured_current, desired_current, nominal_flow,
         flow_control = max(min(flow_control, flow_max), flow_min)
 
         previous_error = error
+
     except Exception as e:
         print("Error in PID_discharge_current: ", e)
         flow_control = nominal_flow
@@ -330,8 +466,6 @@ def PID_magnetic_coil_current(measured_oscillation, desired_oscillation, nominal
 
 
 # Utility Functions: Not tuned to specific values yet, just general structure for safety clamping and conversions
-def clamp(value, min_value, max_value):
-    return(max(min(value, max_value), min_value))
 
 def desired_current(voltage, POWER_TARGET):
     safe_voltage = clamp(voltage, VOLTAGE_MIN, VOLTAGE_MAX)
