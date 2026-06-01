@@ -804,7 +804,7 @@ def parse_args() -> argparse.Namespace:
     # Solver / output
     parser.add_argument("--max-iter", type=int, default=80, help="IPOPT max iterations")
     parser.add_argument("--print-every", type=int, default=25, help="print every N steps")
-    parser.add_argument("--plot-file", type=str, default="SMPC_CpC.png")
+    parser.add_argument("--plot-file", type=str, default="SMPC_CpP.png")
     parser.add_argument("--no-plot", action="store_true", help="disable plotting")
 
     parser.add_argument("--r-force", type=float, default=0.05, help="control effort cost weight")
