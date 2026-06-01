@@ -35,7 +35,7 @@ G = 9.81                    # gravity (m/s^2)
 
 @dataclass
 class CartPoleNominal:
-    m_c_nom: float  = 5.0  # Nominal Cart Mass (kg)
+    m_c_nom: float  = 5.0   # Nominal Cart Mass (kg)
     m_p_nom: float  = 1.0   # Nominal Pole Mass (kg)
     l_nom: float    = 1.0   # Nominal Pole Length (m)
 
@@ -292,7 +292,7 @@ def cartpole_symbolic_derivatives(
 #     return x_next
 
 
-def rk4_symbolic_step(
+def  _symbolic_step(
     x: ca.MX,
     u: ca.MX,
     dt: float,
