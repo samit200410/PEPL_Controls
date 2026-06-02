@@ -1,7 +1,11 @@
 from http import client
-import io
-
 from dataclasses import dataclass, asdict
+from pathlib import Path
+from typing import Any
+from dataclasses import asdict
+
+import io
+import json
 import multiprocessing as mp
 import numpy as np
 import sys, struct, serial, time
@@ -13,15 +17,18 @@ import socket
 # ________________________________________________________
 # Communication variables
 
-# TCP Client Configuration (RX)
+# TCP Client Configuration
 LABVIEW_IP = '10.0.0.1'
-TCP_PORT_TX = 59704                                 # Set this to actual TCP port for receiving data from LabView
-TCP_TX = (LABVIEW_IP, TCP_PORT_TX)
+LABVIEW_PORT = 59704                                 # Set this to actual TCP port for receiving data from LabView
+SOCKET_TIMEOUT = 7.0
+
+# Keep False unless LabVIEW expects a flattened empty string
+# argument for commands whose API argument is ""
+SEND_EMPTY_ARG = False
 
 
-SEND_EMPTY_ARG = True
 
-HEADER_FMT = '>bi'                                  # Example: byte, int
+HEADER_FMT = '>bi'                                  # byte, int
 HEADER_LENGTH = struct.calcsize(HEADER_FMT)
 
 # Command Constants
@@ -33,6 +40,8 @@ CMD_ALICAT_SET_CONTROL = 0x1C                       # Command 28
 
 CMD_LAMBDA_GET_READINGS = 0x23                      # Command 35
 CMD_LAMBDA_SET_CONTROL = 0x24                       # Command 36
+
+
 # ________________________________________________________
 
 
@@ -87,7 +96,7 @@ class AlicatReadings:
     pressure: float
     pressure_units: str
     temperature: float
-    termperature_units: str
+    temperature_units: str
     volume_flow: float
     volume_flow_units: str
     valve_hold: bool
@@ -97,7 +106,7 @@ class AlicatControl:
     label: str
     setpoint: float
     units: str
-    loop_control_variable: int=0            # U16 ENUM: 0 = Mass Flow, 1 = | Pressure |, 2 = Volume Flow
+    loop_control_variable: int=0            # U16 ENUM (unsigned word - 16 bits): 0 = Mass Flow, 1 = | Pressure |, 2 = Volume Flow
     valve_hold: bool = False
 
 @dataclass
@@ -109,7 +118,7 @@ class LambdaReadings:
     voltage_limit: float
     current_limit: float
     overvoltage_protection: float
-    remote_mode: int                        # U8 ENUM: 0 = Local, 1 = Remote, 2 = Local Lockout
+    remote_mode: int                        # U8 ENUM (unsigned byte - unsigned 8 bit int): 0 = Local, 1 = Remote, 2 = Local Lockout
     fault: bool
 
 @dataclass
@@ -168,319 +177,441 @@ class PIDControl:
         return output
 
 
-def clamp(value: float, min_value: float, max_value: float) -> float:
-    return max(min(value, max_value), min_value)
+
+# Flattened Binary Reader/Writer Functions
+
+class LabViewReader:
+    
+    def __init__(self, payload: bytes):
+        self.payload = payload
+        self.offset = 0
+
+    def remaining(self) -> int:
+        payload = self.payload
+        offset = self.offset
+        return len(payload) - offset
+    
+    def read_payload(self, n: int) -> bytes:
+        payload = self.payload
+        offset = self.offset
+
+        if offset + n > len(payload):
+            raise ValueError(
+                f"Payload ended early. Need {n} bytes at offset {offset}, but only {self.remaining()} bytes remain."
+            )
+        
+        out = payload[offset:offset+n]
+        self.offset +=n
+        return out
+
+    # Signed 32 bit integer (big-endian)
+    def i32(self) -> int:
+        return struct.unpack(">i", self.read_payload(4))[0]
+    
+    # Unsigned 8 bit integer (big-endian)
+    def u8(self) -> int:
+        return struct.unpack(">B", self.read_payload(1))[0]
+    
+    # Unsigned 16 bit integer (big-endian)
+    def u16(self) -> int:
+        return struct.unpack(">H", self.read_payload(2))[0]
+    
+    # 64-bit float (big-endian)
+    def f64(self) -> float:
+        return struct.unpack(">d", self.read_payload(8))[0]
+    
+    # Boolean (big-endian)
+    def boolean(self) -> bool:
+        return self.u8() != 0
+    
+    # String (big-endian): 
+    # First 4 bytes is length N, followed by N bytes of UTF-8 encoded string
+    def string(self) -> str:
+        length = self.i32()
+        
+        if length < 0:
+            raise ValueError(
+                f"Negative string length: {length}"
+            )
+        raw_bytes = self.read_payload(length)
+
+        # Throw an error if the bytes aren't valid UTF-8
+        # Replace invalid sequences with the Unicode replacement character instead of crashing
+        return raw_bytes.decode("utf-8", errors="replace")
+    
+    def assert_consume_all(self, context: str) -> None:
+        if self.remaining() != 0:
+            extra = self.payload[self.offset:]
+            raise ValueError(
+                f"{context}: decoded payload but {self.remaining()} bytes remain unconsumed. "
+                f"Number of Extra Bytes: {extra.hex(' ')}"
+                )
+    
+
+class LabViewWriter:
+
+    def __init__(self):
+        self.value_types: list[bytes] = []
+
+    def bytes(self) -> bytes:
+        return b"".join(self.value_types)
+    
+    def i32(self, value: int) -> None:
+        self.value_types.append(struct.pack(">i", int(value)))
+
+    def u8(self, value: int) -> None:
+        self.value_types.append(struct.pack(">B", int(value)))
+
+    def u16(self, value: int) -> None:
+        self.value_types.append(struct.pack(">H", int(value)))
+
+    def f64(self, value: float) -> None:
+        self.value_types.append(struct.pack(">d", float(value)))
+
+    def boolean(self, value: bool) -> None:
+        self.u8(1 if value else 0)
+
+    def string(self, value: str) -> None:
+        encoded = str(value).encode("utf-8")
+        self.i32(len(encoded))
+        self.value_types.append(encoded)
+
+
+def flatten_empty_string() -> bytes:
+    writer = LabViewWriter()
+    writer.string("")
+    return writer.bytes()
+
+
+def empty_payload() -> bytes:
+    return flatten_empty_string() if SEND_EMPTY_ARG else b""
+    
+
+
+# PEPL Lab Device Specific Unpacking Functions
+
+def unpack_magna_readings(payload: bytes) -> MagnaReadings:
+    reader = LabViewReader(payload)
+
+    output = MagnaReadings(
+        voltage = reader.f64(),
+        current = reader.f64(),
+        enabled = reader.boolean(),
+        voltage_limit = reader.f64(),
+        current_limit = reader.f64(),
+        overvoltage_trip = reader.f64(),
+        overcurrent_trip = reader.f64(),
+        local_control = reader.boolean(),
+        alarm = reader.boolean(),
+    )
+
+    reader.assert_consume_all("Magna Readings")
+    return output
+
+
+def unpack_alicat_readings(payload: bytes) -> list[AlicatReadings]:
+    reader = LabViewReader(payload)
+    
+    # Array of Clusters
+    n_controllers = reader.i32()
+
+    output: list[AlicatReadings] = []
+    for _ in range(n_controllers):
+        output.append(
+            AlicatReadings(
+                label = reader.string(),
+                gas = reader.string(),
+                setpoint = reader.f64(),
+                setpoint_units = reader.string(),
+                mass_flow = reader.f64(),
+                mass_flow_units = reader.string(),
+                pressure = reader.f64(),
+                pressure_units = reader.string(),
+                temperature = reader.f64(),
+                temperature_units = reader.string(),
+                volume_flow = reader.f64(),
+                volume_flow_units = reader.string(),
+                valve_hold = reader.boolean(),
+            )
+        )
+
+    reader.assert_consume_all("Alicat Readings")
+    return output
+
+
+def unpack_lambda_readings(payload: bytes) -> list[LambdaReadings]:
+    reader = LabViewReader(payload)
+    
+    # Array of Clusters
+    n_supplies = reader.i32()
+
+    output: list[LambdaReadings] = []
+    for _ in range(n_supplies):
+        output.append(
+            LambdaReadings(
+                label = reader.string(),
+                voltage = reader.f64(),
+                current = reader.f64(),
+                enable = reader.boolean(),
+                voltage_limit = reader.f64(),
+                current_limit = reader.f64(),
+                overvoltage_protection = reader.f64(),
+                remote_mode = reader.u8(),
+                fault = reader.boolean(),
+            )
+        )
+
+    reader.assert_consume_all("Lambda Readings")
+    return output
 
 
 
+# PEPL Lab Device Specific Packing Functions
+
+def pack_magna_control(control: MagnaControl) -> bytes:
+    writer = LabViewWriter()
+
+    writer.f64(control.voltage_limit)
+    writer.f64(control.current_limit)
+    writer.f64(control.overvoltage_trip)
+    writer.f64(control.overcurrent_trip)
+    writer.boolean(control.enable)
+    
+    return writer.bytes()
+
+def pack_alicat_control(controls: list[AlicatControl]) -> bytes:
+    writer = LabViewWriter()
+
+    writer.i32(len(controls))
+
+    for c in controls:
+        writer.string(c.label)
+        writer.f64(c.setpoint)
+        writer.string(c.units)
+        writer.u16(c.loop_control_variable)
+        writer.boolean(c.valve_hold)
+
+    return writer.bytes()
+
+def pack_lambda_control(controls: list[LambdaControl]) -> bytes:
+    writer = LabViewWriter()
+
+    writer.i32(len(controls))
+
+    for c in controls:
+        writer.string(c.label)
+        writer.f64(c.voltage_limit)
+        writer.f64(c.current_limit)
+        writer.f64(c.overvoltage_protection)
+        writer.boolean(c.enable)
+
+    return writer.bytes()
 
 
 
+# TCP Client 
+
+def receive_from_labview(socket: socket.socket, n_bytes: int) -> bytes:
+    data = b""
+
+    while len(data) < n_bytes:
+            packet = socket.recv(n_bytes - len(data))
+            if not packet:
+                raise ConnectionError(
+                    f"Socket closed early. Expected {n_bytes} bytes, but only received {len(data)} bytes before connection closed."
+                )
+            
+            data += packet
+
+    return data
+
+
+class LabViewClient:
+    
+    def __init__(self, host: str, port: int, timeout: float = SOCKET_TIMEOUT):
+        self.host = host
+        self.port = port
+        self.timeout = timeout
+        self.socket: socket.socket | None = None
+
+    def connect(self) -> None:
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.settimeout(self.timeout)
+        self.socket.connect((self.host, self.port))
+        print(
+            f"Connected to LabVIEW at {self.host}:{self.port}"
+        )
+
+    def close(self) -> None:
+        if self.socket is not None:
+            self.socket.close()
+            self.socket = None
+
+    def send_packet(self, command_id: int, payload: bytes = b"") -> None:
+        if self.socket is None:
+            raise RuntimeError(
+                "Socket is not connected."
+            )
+        
+        header = struct.pack(HEADER_FMT, command_id, len(payload))
+        self.socket.sendall(header + payload)
+
+    def receive_packet(self, expected_command_id: int | None = None) -> tuple[int, bytes]:
+        if self.socket is None:
+            raise RuntimeError(
+                "Socket is not connected."
+            )
+        
+        header = receive_from_labview(self.socket, HEADER_LENGTH)
+        command_id, payload_length = struct.unpack(HEADER_FMT, header)
+
+        if payload_length < 0:
+            raise ValueError(
+                f"LabVIEW returned negative payload length: {payload_length}"
+            )
+        
+        payload = receive_from_labview(self.socket, payload_length)
+
+        if expected_command_id is not None and command_id != expected_command_id:
+            raise ValueError(
+                f"Unexpected command ID. Expected {expected_command_id}, but got {command_id}"
+            )
+        
+        return command_id, payload
+    
+    def request(self, command_id: int, payload: bytes = b"") -> bytes:
+        self.send_packet(command_id, payload)
+        _, response_payload = self.receive_packet(expected_command_id = command_id)
+        return response_payload
+    
+
+
+# API Handling
+
+def check_empty_ack(name: str, response_payload: bytes) -> None:
+    # LabVIEW acknowledges a set command with:
+    # Payload length 0
+    # Flattened Empty String: 00 00 00 00
+    # Accept Both
+    if response_payload in (b"", b"\x00\x00\x00\x00"):
+        return
+    print(
+        f"Warning: {name} returned unexpected non-empty payload "
+        f"({len(response_payload)}) bytes: {response_payload.hex(' ')}"
+    )
+
+def get_magna_readings(client: LabViewClient) -> MagnaReadings:
+    payload = client.request(CMD_MAGNA_GET_READINGS, empty_payload())
+    return unpack_magna_readings(payload)
+    
+def set_magna_control(client: LabViewClient, control: MagnaControl) -> None:
+    response = client.request(CMD_MAGNA_SET_CONTROL, pack_magna_control(control))
+    return check_empty_ack("Magna Set Control", response)
+
+def get_alicat_readings(client: LabViewClient) -> list[AlicatReadings]:
+    payload = client.request(CMD_ALICAT_GET_READINGS, empty_payload())
+    return unpack_alicat_readings(payload)
+
+def set_alicat_control(client: LabViewClient, control: list[AlicatControl]) -> None:
+    response = client.request(CMD_ALICAT_SET_CONTROL, pack_alicat_control(control))
+    return check_empty_ack("Alicat Set Control", response)
+
+def get_lambda_readings(client: LabViewClient) -> list[LambdaReadings]:
+    payload = client.request(CMD_LAMBDA_GET_READINGS, empty_payload())
+    return unpack_lambda_readings(payload)
+
+def set_lambda_control(client: LabViewClient, control: list[LambdaControl]) -> None:
+    response = client.request(CMD_LAMBDA_SET_CONTROL, pack_lambda_control(control))
+    return check_empty_ack("Lambda Set Controls", response)
+
+
+# Debugging Interface
 
 
 
+# PLACEHOLDER - Control Logic Goes Here
+
+def control_placeholder(
+        magna: MagnaReadings,
+        alicat_controllers: list[AlicatReadings],
+        lambda_supplies: list[LambdaReadings],
+        manual_commands: ManualCommand
+) -> ManualCommand:
+    
+
+    return manual_commands
+        
 
 
+# Main Loop
 
+def main() -> None:
 
+    client = LabViewClient(LABVIEW_IP, LABVIEW_PORT)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# TCP Server Configuration (TX)
-HOST = socket.gethostbyname(socket.gethostname()) 
-print("Host IP: ", HOST)
-TCP_PORT_RX = 54709                                 # Set this to actual TCP port for transmitting data to LabView
-TCP_RX = (HOST, TCP_PORT_RX)
-
-
-
-# Message Protocol Constants
-HEADER = 4
-COMMAND = 1  
-LENGTH = 4
-
-# Command Constants
-MAGNA_FETCH = 0x10                                  # Command 16
-MAGNA_SET = 0x10                                    # Command 17
-
-# Struct format for packing/unpacking data --> Big-Endian Order
-struct_fmt = '>bi2d?4d2?'                           # Example: byte, int, 2 doubles, bool, 4 doubles, 2 bools
-exp_length = struct.calcsize(struct_fmt)
-print("Expected Packet Length: ", exp_length)
-
-# Struct client commands --> Big-Endian Order
-cmd_fmt = '>bi4d?'                                  # Example: byte, int, 4 doubles, bool
-cmd_length = struct.calcsize(cmd_fmt)
-print("Command Packet Length: ", cmd_length)
-
-
-
-# Shared Data
-latest_packet = None
-
-# Locks for shared data
-reader_lock = mp.Lock()
-writer_lock = mp.Lock()
-
-
-# def Receive_Terminal_Input():
-#     while True:
-#         user_input = input("Enter current value (or 'exit' to quit): ")
-#         if user_input.lower() == 'exit':
-#             print("Exiting terminal input thread.")
-#             break
-#         else:
-#             global new_desired_current_value
-#             new_desired_current_value = float(user_input)
-#             user_flag = True
-
-
-# Reads desired setpoints from file
-def read_desired_setpoints(filename, last_value):
     try:
-        with open(filename,'r') as file:
-            text = file.read().strip()
+        client.connect()
 
-            if text == "":
-                print("Setpoint file is EMPTY. Using last known setpoint: ", last_value)
-                return last_value
-        
-            new_value = float(text)
+        while True:
 
-            if new_value < 0:
-                print("Setpoint value cannot be negative. Using last known setpoint: ", last_value)
-                return last_value
-            
-            return new_value
-        
-    except FileNotFoundError:
-        print(f"Setpoint file '{filename}' not found. Creating file with defalt value: {last_value} A.")
-        with open(filename, 'w') as file:
-            file.write(str(last_value))
-        return last_value
-    
-    except ValueError:
-        print("Invalid spetpoint file contents. Using last known setpoint: ", last_value)
-        return last_value
-    
-    except Exception as e:
-        print("Error reading setpoint file: ", e)
-        print("Using last known setpoint: ", last_value)
-        return last_value
-    
+            # 1. Receive Fresh Readings - All LabVIEW Sections
+
+            magna = get_magna_readings(client)
+            alicat_controllers = get_alicat_readings(client)
+            lambda_supplies = get_lambda_readings(client)
+
+            # 2. Show Readings for Debugging
+            #TODO
 
 
-def PID_threadspawner():
+            # 3. Load Commands from Local Editable JSON File 
+            # TODO: For Future Implementation --> Create GUI
+            manual_commands = 
 
-    # user_thread = mp.Process(target=Receive_Terminal_Input)
-    # user_thread.start()
+            # 4. Control Process to Modify Manual Commands
+            # TODO: Implement Controls Algorithm
+            proposed_commands = control_placeholder(
+                magna = magna,
+                alicat_controllers = alicat_controllers,
+                lambda_supplies = lambda_supplies,
+                manual_commands = manual_commands,
+            )
 
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as client_socket:
-        
-        print("Communicating with LabVIEW...")
-        client_socket.settimeout(7.0)
-        
-        
-        try:
-            client_socket.connect(TCP_TX)
-        except TimeoutError:
-            print("Connection to LabVIEW timed out. Please check the connection and try again.")
-            return
+            # 5. Send proposed commands back to LabVIEW
+            if proposed_commands.send_magna:
+                set_magna_control(client, proposed_commands.magna)
 
-        # Communicate with LabVIEW
-        try:
-            
-            
-            while True:
-                
-                # 1) Get = command 17 --> Structure: byte, int, 2 doubles, bool, 4 doubles, 2 bools
-                print("Requesting data from LabVIEW...")
-                packet = struct.pack('>bi', CMD_GET_DATA, 0x00000000)
-                client_socket.sendall(packet)
-                ack = client_socket.recv(1024)
-                cmd_ret, length, voltage, current, enabled, voltage_limit, current_limit, voltage_trip, current_trip, local_ctrl, alarm = struct.unpack(struct_fmt, ack)
-                if cmd_ret == CMD_GET_DATA:
-                    print("cmd:", cmd_ret, "\nlength:", length, "\nvoltage: ", voltage, "\ncurrent: ", current, "\nenabled: ", enabled,
-                        "\nvoltage_limit: ", voltage_limit, "\ncurrent_limit: ", current_limit, "\nvoltage_trip: ", voltage_trip, "\ncurrent_trip: ", current_trip, "\nLocal Control: ", local_ctrl, "\nAlarm: ", alarm)
-                
-                shutdown = False
-                if voltage > 25:
-                    print("Voltage exceeds safe threshold! Initiating shutdown...")
-                    shutdown = True
+            if proposed_commands.send_alicat:
+                set_alicat_control(client, proposed_commands.alicat_controllers)
 
-                
-                # Implement PID
-                global integral_error_flow, previous_error_flow, last_valid_desired_current
-                measured_current = current
+            if proposed_commands.send_lambda:
+                set_lambda_control(client, proposed_commands.lambda_supplies)
 
-                desired_current = read_desired_setpoints(SETPOINT_FILE, last_valid_desired_current)
-                last_valid_desired_current = desired_current
-
-                print("Measured Current: ", measured_current)
-                print("Desired Current: ", desired_current)
-                
-                flow_control, integral_error_flow, previous_error_flow = PID_discharge_current(measured_current, desired_current, nominal_flow, integral_error_flow, previous_error_flow, dt)
-                print("Computed flow control: ", flow_control, "\nIntegral Error: ", integral_error_flow, "\nPrevious Error: ", previous_error_flow)
-                
-
-                # 2) Set = command 16 --> Structure: byte, int, 4 doubles, bool
-                # CMD, length, voltage_lim, current_lim, voltage_trp, current_trp, enable
-                print("\nSending data to LabVIEW...")
-                
-                packet = struct.pack(cmd_fmt, CMD_SET_DATA, 0x00000021, flow_control, 15.0, 50.0, 50.0, not shutdown)
-                print("Packed data to send: ", packet)
-                client_socket.sendall(packet)
-                ack = client_socket.recv(1024)
-                cmd, length = struct.unpack('>bi', ack)
-                print("cmd: ", cmd, "\nlength: ", length)
-
-                # count += 1
-                
-                time.sleep(0.5)
-            
-    
-        except Exception as e:  
-            print("Generic Error:", e)
-        finally:
-            client_socket.close()
-    
-    # user_thread.join()
-
-    return
-    
-    # Start thread for discharge current controls
-    # discharge_current_thread = mp.Process(target=PID_discharge_current, args=(...)) # TODO: Fill in arguments
-    # discharge_current_thread.start()
-
-    # Start thread for magnetic coil current control
-    # magnetic_coil_thread = mp.Process(target=PID_magnetic_coil_current, args=(...)) # TODO: Fill in arguments
-    # magnetic_coil_thread.start()
-
-    # discharge_current_thread.join()
-    # magnetic_coil_thread.join()
+            time.sleep(0.5)     # Adjust Sleep Cycle Between Reads if Necessary
 
 
+    except KeyboardInterrupt:
+        print("\nStopped by user input.")
 
-def PID_discharge_current(measured_current, desired_current, nominal_flow,
-                          integral_error, previous_error, dt):
-    
-    # PID Variable Gains 
-    Kp = FLOW_KP
-    Ki = FLOW_KI
-    Kd = FLOW_KD
-
-    # Flow Safety
-    flow_min = ANODE_FLOW_MIN
-    flow_max = ANODE_FLOW_MAX
-    
-    # Integral Windup Prevention
-    integral_min = -20.0
-    integral_max = 20.0
-
-    try: 
-        error = desired_current - measured_current
-
-        integral_error += error * dt
-        integral_error = max(min(integral_error, integral_max), integral_min)
-
-        derivative_error = (error - previous_error) / dt
-        
-        control = Kp * error + Ki * integral_error + Kd * derivative_error
-        print("control: ", control)
-
-        flow_control = nominal_flow + control
-        flow_control = max(min(flow_control, flow_max), flow_min)
-
-        previous_error = error
-
-    except Exception as e:
-        print("Error in PID_discharge_current: ", e)
-        flow_control = nominal_flow
-
-    return flow_control, integral_error, previous_error
-
-
-
-# MAGNETIC COIL CURRENT CONTROL NOT IMPLEMENTED YET
-def PID_magnetic_coil_current(measured_oscillation, desired_oscillation, nominal_coil_current,
-                              integral_error, previous_error, dt):
-    # TODO: Implement Testbench and tune variables
-
-    Kp = MAG_KP
-    Ki = MAG_KI
-    Kd = MAG_KD
-
-    # Flow Safety
-    coil_min = OUTER_MAG_MIN
-    coil_max = OUTER_MAG_MAX
-
-    # Integral Windup Prevention
-    integral_min = None
-    integral_max = None
-
-    # Step 1: compute control error
-    error = desired_oscillation - measured_oscillation
-
-    # Step 2: update integral term
-    integral_error += error * dt
-    integral_error = max(min(integral_error, integral_max), integral_min)
-
-    # Step 3: compute derivative term
-    derivative_error = (error - previous_error) / dt
-
-    # Step 4: PID formula
-    correction = Kp * error + Ki * integral_error + Kd * derivative_error
-
-    # Step 5: compute commanded magnetic coil current
-    coil_command = nominal_coil_current + correction
-
-    # Step 6: clamp coil command to safe range
-    coil_command = max(min(coil_command, coil_max), coil_min)
-
-    # Step 7: update memory for next call
-    previous_error = error
-
-    return coil_command, integral_error, previous_error, error
-
-
-# Utility Functions: Not tuned to specific values yet, just general structure for safety clamping and conversions
-
-def desired_current(voltage, POWER_TARGET):
-    safe_voltage = clamp(voltage, VOLTAGE_MIN, VOLTAGE_MAX)
-    return POWER_TARGET / safe_voltage
-
-def flow_rate(anode_flow, cathode_fraction = CATHODE_FRAC_NOMINAL):
-    safe_fraction = clamp(cathode_fraction, CATHODE_FRAC_MIN, CATHODE_FRAC_MAX)
-    return anode_flow * safe_fraction
-
+    finally:
+        client.close()
+        print("Socket closed.")
 
 
 if __name__ == "__main__":
+    main()
 
-    PID_threadspawner()
 
-    print("PID control threads have completed execution.")
 
-    
+
+
+
+
+
+
+
+# Helper Functions
+
+def clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min(value, max_value), min_value)
+
