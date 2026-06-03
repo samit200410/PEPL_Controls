@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, asdict, field
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 import copy, json, socket, struct, time
 
@@ -20,7 +20,7 @@ SOCKET_TIMEOUT = 7.0
 # Keep False unless LabVIEW expects a flattened empty string argument for ""
 SEND_EMPTY_ARG = False
 
-HEADER_FMT = '>bi'                                  # signed byte command_id, signed int payload_length
+HEADER_FMT = '>bi'                                  # byte command_id, signed int payload_length
 HEADER_LENGTH = struct.calcsize(HEADER_FMT)
 
 # Command Constants from API_Short.xlsx
@@ -36,33 +36,20 @@ CMD_LAMBDA_SET_CONTROL = 0x24                       # Command 36
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
-# Test-Control Configuration
-
-USER_COMMANDS_PATH = Path("manual_commands.json")
-INITIAL_STATE_PATH = Path("initial_DAQ_snapshot.json")
-LOOP_DT_SEC = 0.75
 
 # Safe Operating Ranges for H9 HET
-DISCHARGE_VOLTAGE_MIN = 300.0                       # Volts
-DISCHARGE_VOLTAGE_MAX = 400.0                       # Volts
+# DISCHARGE_VOLTAGE_MIN = 300.0                       # Volts
+# DISCHARGE_VOLTAGE_MAX = 400.0                       # Volts
 
-DISCHARGE_CURRENT_MIN = 15.0                        # Amps
-DISCHARGE_CURRENT_MAX = 30.0                        # Amps
+# DISCHARGE_CURRENT_MIN = 15.0                        # Amps
+# DISCHARGE_CURRENT_MAX = 30.0                        # Amps
 
-MASS_FLOW_MIN = 10.0                                # mg/sec
-MASS_FLOW_MIN = 20.0                                # mg/sec
+# MASS_FLOW_MIN = 10.0                                # mg/sec
+# MASS_FLOW_MIN = 20.0                                # mg/sec
 
-MAGNET_PERCENT_MIN = 75.0                           # %
-MAGNET_PERCENT_MAX = 125.0                          # %
+# MAGNET_PERCENT_MIN = 75.0                           # %
+# MAGNET_PERCENT_MAX = 125.0                          # %
 # ---------------------------------------------------------------------------
-
-
-# Helper Functions
-
-def clamp(value: float, min_value: float, max_value: float) -> float:
-    return max(min(value, max_value), min_value)
-
-
 
 
 
@@ -133,80 +120,10 @@ class LambdaControl:
     enable: bool = False
 
 @dataclass
-class ControlInterface:
-
-    # mode:
-    #     "manual"     -> Manually requested setpoints
-    #     "autonomous" -> Command object built and passed to autonomous_control()
-
-    # enabled:
-    #     False         -> Send the raw manual command arrays unchanged
-    #     True          -> Apply the test setpoints below before sending / autonomous control
-
-    enabled: bool = False
-    mode: Literal["manual", "autonomous"] = "manual"
-
-    desired_mean_discharge_current: float = None
-    discharge_voltage: float = None
-    discharge_current_limit: float = None
-    mass_flow: float = None
-    magnet_percent: float = None
-
-    mass_flow_labels: list[str] = field(default_factory = list)
-    magnet_labels: list[str] = field(default_factory = list)
-
-
-
-
-
-
-@dataclass
-class ManualControl:
+class DeviceCommands:
     magna_supplies: MagnaControl
     alicat_supplies: list[AlicatControl]
     lambda_supplies: list[LambdaControl]
-    runtime_control: ControlInterface = field(default_factory = ControlInterface)
-    send_magna: bool = True
-    send_alicat: bool = True
-    send_lambda: bool = True
-
-@dataclass
-class PIDControl:
-    kp: float
-    ki: float
-    kd: float
-    output_min: float
-    output_max: float
-    integral_min: float
-    integral_max: float
-
-    integral: float = 0.0
-    previous_error: float = 0.0
-    first_call: bool = True
-
-    def update(self, setpoint: float, measurement: float, nominal_output: float, dt: float) -> float:
-        error = setpoint - measurement
-
-        self.integral += error * dt
-        self.integral = clamp(self.integral, self.integral_min, self.integral_max)
-
-        if self.first_call:
-            derivative = 0.0
-            self.first_call = False
-        else:
-            derivative = (error - self.previous_error) / dt
-
-        correction = (
-            self.kp * error
-            + self.ki * self.integral
-            + self.kd * derivative
-        )
-
-        output = nominal_output + correction
-        output = clamp(output, self.output_min, self.output_max)
-
-        self.previous_error = error
-        return output
 
 
 
@@ -279,7 +196,6 @@ class LabViewReader:
                 f"Number of Extra Bytes: {extra.hex(' ')}"
                 )
     
-
 class LabViewWriter:
 
     def __init__(self):
@@ -308,12 +224,10 @@ class LabViewWriter:
         self.i32(len(encoded))
         self.value_types.append(encoded)
 
-
 def flatten_empty_string() -> bytes:
     writer = LabViewWriter()
     writer.string("")
     return writer.bytes()
-
 
 def empty_payload() -> bytes:
     return flatten_empty_string() if SEND_EMPTY_ARG else b""
@@ -339,7 +253,6 @@ def unpack_magna_readings(payload: bytes) -> MagnaReadings:
 
     reader.assert_consume_all("Magna Readings")
     return output
-
 
 def unpack_alicat_readings(payload: bytes) -> list[AlicatReadings]:
     reader = LabViewReader(payload)
@@ -369,7 +282,6 @@ def unpack_alicat_readings(payload: bytes) -> list[AlicatReadings]:
 
     reader.assert_consume_all("Alicat Readings")
     return output
-
 
 def unpack_lambda_readings(payload: bytes) -> list[LambdaReadings]:
     reader = LabViewReader(payload)
@@ -450,13 +362,13 @@ def receive_from_labview(socket: socket.socket, n_bytes: int) -> bytes:
             packet = socket.recv(n_bytes - len(data))
             if not packet:
                 raise ConnectionError(
-                    f"Socket closed early. Expected {n_bytes} bytes, but only received {len(data)} bytes before connection closed."
+                    f"Socket closed early. Expected {n_bytes} bytes, "
+                    f"but only received {len(data)} bytes before connection closed."
                 )
             
             data += packet
 
     return data
-
 
 class LabViewClient:
     
@@ -557,102 +469,157 @@ def set_lambda_control(client: LabViewClient, control: list[LambdaControl]) -> N
     return check_empty_ack("Lambda Set Controls", response)
 
 
-# Debugging Interface
 
+# "GET" Measurments & Make a Shipping Packet Acceptable by Control Model
 
-def commands_to_json(commands: ManualControl) -> dict[str, Any]:
+def get_measurements_for_model(client: LabViewClient) -> dict[str, Any]:
 
-    return{
-        "send_magna": commands.send_magna,
-        "send_alicat": commands.send_alicat,
-        "send_lambda": commands.send_lambda,
-        "magna": asdict(commands.magna_supplies),
-        "alicat": [asdict(x) for x in commands.alicat_supplies],
-        "lambda": [asdict(x) for x in commands.lambda_supplies],
+    # "GET" all LabVIEW measurements and return a plain Python dictionary
+    magna_supplies = get_magna_readings(client)
+    alicat_supplies = get_alicat_readings(client)
+    lambda_supplies = get_lambda_readings(client)
+
+    return {
+        "timestamp_s": time.time(),
+        "magna": asdict(magna_supplies),
+        "alicat": [asdict(item) for item in alicat_supplies],
+        "lambda": [asdict(item) for item in lambda_supplies],
     }
 
-def create_default_commands_file(path: Path = USER_COMMANDS_PATH) -> ManualControl:
-    commands = ManualControl(
-        send_magna = True,
-        send_alicat = True,
-        send_lambda = True,
-
-        magna_supplies = MagnaControl(
-            voltage_limit = 25.0,
-            current_limit = 10.0,
-            overvoltage_trip = 30.0,
-            overcurrent_trip = 15.0,
-            enable = False,
-        ),
-
-        alicat_supplies = [
-            AlicatControl(
-                label = "Anode",
-                setpoint = None,
-                units = None,
-                loop_control_variable = None,
-                valve_hold = None,
-
-        ),
-
-            AlicatControl( 
-                label = "Cathode",
-                setpoint = None,
-                units = None,
-                loop_control_variable = None,
-                valve_hold = None,
-            ),
-
-            AlicatControl( 
-                label = "Keeper",
-                setpoint = None,
-                units = None,
-                loop_control_variable = None,
-                valve_hold = None,
-            ),
 
 
-        ],
 
-        lambda_supplies = [
-            LambdaControl(
-                label = None,
-                voltage_limit = None,
-                current_limit = None,
-                overvoltage_protection = None,
-                enable = None,
-            ),
 
-            LambdaControl(
-                label = None,
-                voltage_limit = None,
-                current_limit = None,
-                overvoltage_protection = None,
-                enable = None,
-            ),
 
-        ],
 
+
+
+
+# Fetch Control Model Setpoints & "SET" them in LabVIEW
+
+def commands_from_measurements(measurements: dict[str, Any]) -> DeviceCommands:
+    magna_raw = measurements["magna"]
+    alicat_raw = measurements["alicat"]
+    lambda_raw = measurements["lambda"]
+
+    magna_supplies = MagnaControl(
+        voltage_limit = float(magna_raw["voltage_limit"]),
+        current_limit = float(magna_raw["current_limit"]),
+        overvoltage_trip = float(magna_raw["overvoltage_trip"]),
+        overcurrent_trip = float(magna_raw["overcurrent_trip"]),
+        enable = bool(magna_raw["enable"]),
     )
 
-    path.write_text(json.dumps(commands_to_json(commands), indent = 2))
-    print(f"created default manual command file: {path.resolve()}")
-    return commands
+    alicat_supplies = [
+        AlicatControl(
+            label = str(item["label"]),
+            setpoint = float(item["setpoint"]),
+            units = str(item["setpoint_units"]),
+            loop_control_variable = 0,
+            valve_hold = bool(item["valve_hold"]),
+        )
+
+        for item in alicat_raw
+
+    ]
+
+    lambda_supplies = [
+        LambdaControl(
+            label = str(item["label"]),
+            voltage_limit = float(item["voltage_limit"]),
+            current_limit = float(item["current_limit"]),
+            overvoltage_protection = float(item["overvoltage_protection"]),
+            enable = bool(item["enable"]),
+        )
+
+        for item in lambda_raw
+
+    ]
+
+    return DeviceCommands(magna_supplies = magna_supplies , alicat_supplies = alicat_supplies, lambda_supplies = lambda_supplies)
 
 
+def _find_alicat(commands: DeviceCommands, label: str) -> AlicatControl:
+    for item in commands.alicat_supplies:
+        if item.label == label:
+            return item
+    raise ValueError(f"Could not find Alicat controller with label {label!r}.")
 
-# PLACEHOLDER - Control Logic Goes Here
 
-def control_placeholder(
-        magna_controllers: MagnaReadings,
-        alicat_controllers: list[AlicatReadings],
-        lambda_controllers: list[LambdaReadings],
-        manual_commands: ManualControl
-) -> ManualControl:
+def _find_lambda(commands: DeviceCommands, label: str) -> LambdaControl:
+    for item in commands.lambda_supplies:
+        if item.label == label:
+            return item
+    raise ValueError(f"Could not find Lambda supply with label {label!r}.")
+
+
+def apply_model_setpoints(commands: DeviceCommands, model_setpoints: dict[str, Any]) -> DeviceCommands:
+
+    updated = copy.deepcopy(commands)
+
+    # Magna-Power discharge supply updates.
+    magna_sp = model_setpoints.get("magna", {})
+    if "voltage_limit" in magna_sp:
+        updated.magna_supplies.voltage_limit = float(magna_sp["voltage_limit"])
+    if "current_limit" in magna_sp:
+        updated.magna_supplies.current_limit = float(magna_sp["current_limit"])
+    if "overvoltage_trip" in magna_sp:
+        updated.magna_supplies.overvoltage_trip = float(magna_sp["overvoltage_trip"])
+    if "overcurrent_trip" in magna_sp:
+        updated.magna_supplies.overcurrent_trip = float(magna_sp["overcurrent_trip"])
+    if "enable" in magna_sp:
+        updated.magna_supplies.enable = bool(magna_sp["enable"])
+
+    # Alicat MFC updates. Send the full array, but only modify listed labels.
+    for alicat_sp in model_setpoints.get("alicat", []):
+        label = str(alicat_sp["label"])
+        target = _find_alicat(updated, label)
+        if "setpoint" in alicat_sp:
+            target.setpoint = float(alicat_sp["setpoint"])
+        if "units" in alicat_sp:
+            target.units = str(alicat_sp["units"])
+        if "loop_control_variable" in alicat_sp:
+            target.loop_control_variable = int(alicat_sp["loop_control_variable"])
+        if "valve_hold" in alicat_sp:
+            target.valve_hold = bool(alicat_sp["valve_hold"])
+
+    # Lambda auxiliary supply updates. Send the full array, but only modify listed labels.
+    for lambda_sp in model_setpoints.get("lambda", []):
+        label = str(lambda_sp["label"])
+        target = _find_lambda(updated, label)
+        if "voltage_limit" in lambda_sp:
+            target.voltage_limit = float(lambda_sp["voltage_limit"])
+        if "current_limit" in lambda_sp:
+            target.current_limit = float(lambda_sp["current_limit"])
+        if "overvoltage_protection" in lambda_sp:
+            target.overvoltage_protection = float(lambda_sp["overvoltage_protection"])
+        if "enable" in lambda_sp:
+            target.enable = bool(lambda_sp["enable"])
+
+    return updated
+
+
+def send_model_setpoints_to_labview(client: LabViewClient, model_setpoints: dict[str, Any], latest_measurements: dict[str, Any] | None = None) -> DeviceCommands:
+
+    if latest_measurements is None:
+        latest_measurements = get_measurements_for_model(client)
+
+    base_commands = commands_from_measurements(latest_measurements)
+    final_commands = apply_model_setpoints(base_commands, model_setpoints)
+
+    set_magna_control(client, final_commands.magna_supplies)
+    set_alicat_control(client, final_commands.alicat_supplies)
+    set_lambda_control(client, final_commands.lambda_supplies)
+
+    return final_commands
     
 
-    return manual_commands
-        
+
+
+
+
+
+
 
 
 # Main Loop
