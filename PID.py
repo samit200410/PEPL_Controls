@@ -1,20 +1,15 @@
-from http import client
-from dataclasses import dataclass, asdict
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict, field
 from pathlib import Path
-from typing import Any
-from dataclasses import asdict
+from typing import Any, Literal
 
-import io
-import json
-import multiprocessing as mp
-import numpy as np
-import sys, struct, serial, time
-import socket
+import copy, json, socket, struct, time
 
 
-# Global Variables
+# GLOBAL VARIABLES
 
-# ________________________________________________________
+# ---------------------------------------------------------------------------
 # Communication variables
 
 # TCP Client Configuration
@@ -22,16 +17,13 @@ LABVIEW_IP = '10.0.0.1'
 LABVIEW_PORT = 59704                                 # Set this to actual TCP port for receiving data from LabView
 SOCKET_TIMEOUT = 7.0
 
-# Keep False unless LabVIEW expects a flattened empty string
-# argument for commands whose API argument is ""
+# Keep False unless LabVIEW expects a flattened empty string argument for ""
 SEND_EMPTY_ARG = False
 
-
-
-HEADER_FMT = '>bi'                                  # byte, int
+HEADER_FMT = '>bi'                                  # signed byte command_id, signed int payload_length
 HEADER_LENGTH = struct.calcsize(HEADER_FMT)
 
-# Command Constants
+# Command Constants from API_Short.xlsx
 CMD_MAGNA_GET_READINGS = 0x12                       # Command 18
 CMD_MAGNA_SET_CONTROL = 0x13                        # Command 19
 
@@ -41,25 +33,36 @@ CMD_ALICAT_SET_CONTROL = 0x1C                       # Command 28
 CMD_LAMBDA_GET_READINGS = 0x23                      # Command 35
 CMD_LAMBDA_SET_CONTROL = 0x24                       # Command 36
 
+# ---------------------------------------------------------------------------
 
-# ________________________________________________________
+# ---------------------------------------------------------------------------
+# Test-Control Configuration
+
+USER_COMMANDS_PATH = Path("manual_commands.json")
+INITIAL_STATE_PATH = Path("initial_DAQ_snapshot.json")
+LOOP_DT_SEC = 0.75
+
+# Safe Operating Ranges for H9 HET
+DISCHARGE_VOLTAGE_MIN = 300.0                       # Volts
+DISCHARGE_VOLTAGE_MAX = 400.0                       # Volts
+
+DISCHARGE_CURRENT_MIN = 15.0                        # Amps
+DISCHARGE_CURRENT_MAX = 30.0                        # Amps
+
+MASS_FLOW_MIN = 10.0                                # mg/sec
+MASS_FLOW_MIN = 20.0                                # mg/sec
+
+MAGNET_PERCENT_MIN = 75.0                           # %
+MAGNET_PERCENT_MAX = 125.0                          # %
+# ---------------------------------------------------------------------------
 
 
-# ________________________________________________________
-# Shared variables for PID control
+# Helper Functions
 
-SETPOINT_FILE = "desired_current_setpoints.txt"
-DEFAULT_DESIRED_CURRENT = 4.0
-last_valid_desired_current = DEFAULT_DESIRED_CURRENT 
-# tbd_current_vals = [10.0, 5.0, 13.0]
+def clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min(value, max_value), min_value)
 
-user_flag = False
-measured_current = 0.0
-nominal_flow = 5.0
-integral_error_flow = 0.0
-previous_error_flow = 0.0
-dt = 0.5
-# ________________________________________________________
+
 
 
 
@@ -130,10 +133,39 @@ class LambdaControl:
     enable: bool = False
 
 @dataclass
+class ControlInterface:
+
+    # mode:
+    #     "manual"     -> Manually requested setpoints
+    #     "autonomous" -> Command object built and passed to autonomous_control()
+
+    # enabled:
+    #     False         -> Send the raw manual command arrays unchanged
+    #     True          -> Apply the test setpoints below before sending / autonomous control
+
+    enabled: bool = False
+    mode: Literal["manual", "autonomous"] = "manual"
+
+    desired_mean_discharge_current: float = None
+    discharge_voltage: float = None
+    discharge_current_limit: float = None
+    mass_flow: float = None
+    magnet_percent: float = None
+
+    mass_flow_labels: list[str] = field(default_factory = list)
+    magnet_labels: list[str] = field(default_factory = list)
+
+
+
+
+
+
+@dataclass
 class ManualControl:
     magna_supplies: MagnaControl
     alicat_supplies: list[AlicatControl]
     lambda_supplies: list[LambdaControl]
+    runtime_control: ControlInterface = field(default_factory = ControlInterface)
     send_magna: bool = True
     send_alicat: bool = True
     send_lambda: bool = True
@@ -528,15 +560,95 @@ def set_lambda_control(client: LabViewClient, control: list[LambdaControl]) -> N
 # Debugging Interface
 
 
+def commands_to_json(commands: ManualControl) -> dict[str, Any]:
+
+    return{
+        "send_magna": commands.send_magna,
+        "send_alicat": commands.send_alicat,
+        "send_lambda": commands.send_lambda,
+        "magna": asdict(commands.magna_supplies),
+        "alicat": [asdict(x) for x in commands.alicat_supplies],
+        "lambda": [asdict(x) for x in commands.lambda_supplies],
+    }
+
+def create_default_commands_file(path: Path = USER_COMMANDS_PATH) -> ManualControl:
+    commands = ManualControl(
+        send_magna = True,
+        send_alicat = True,
+        send_lambda = True,
+
+        magna_supplies = MagnaControl(
+            voltage_limit = 25.0,
+            current_limit = 10.0,
+            overvoltage_trip = 30.0,
+            overcurrent_trip = 15.0,
+            enable = False,
+        ),
+
+        alicat_supplies = [
+            AlicatControl(
+                label = "Anode",
+                setpoint = None,
+                units = None,
+                loop_control_variable = None,
+                valve_hold = None,
+
+        ),
+
+            AlicatControl( 
+                label = "Cathode",
+                setpoint = None,
+                units = None,
+                loop_control_variable = None,
+                valve_hold = None,
+            ),
+
+            AlicatControl( 
+                label = "Keeper",
+                setpoint = None,
+                units = None,
+                loop_control_variable = None,
+                valve_hold = None,
+            ),
+
+
+        ],
+
+        lambda_supplies = [
+            LambdaControl(
+                label = None,
+                voltage_limit = None,
+                current_limit = None,
+                overvoltage_protection = None,
+                enable = None,
+            ),
+
+            LambdaControl(
+                label = None,
+                voltage_limit = None,
+                current_limit = None,
+                overvoltage_protection = None,
+                enable = None,
+            ),
+
+        ],
+
+    )
+
+    path.write_text(json.dumps(commands_to_json(commands), indent = 2))
+    print(f"created default manual command file: {path.resolve()}")
+    return commands
+
+
 
 # PLACEHOLDER - Control Logic Goes Here
 
 def control_placeholder(
-        magna: MagnaReadings,
+        magna_controllers: MagnaReadings,
         alicat_controllers: list[AlicatReadings],
-        lambda_supplies: list[LambdaReadings],
-        manual_commands: ManualCommand
-) -> ManualCommand:
+        lambda_controllers: list[LambdaReadings],
+        manual_commands: ManualControl
+) -> ManualControl:
     
 
     return manual_commands
@@ -556,9 +668,9 @@ def main() -> None:
 
             # 1. Receive Fresh Readings - All LabVIEW Sections
 
-            magna = get_magna_readings(client)
-            alicat_controllers = get_alicat_readings(client)
-            lambda_supplies = get_lambda_readings(client)
+            magna_data = get_magna_readings(client)
+            alicat_data = get_alicat_readings(client)
+            lambda_data = get_lambda_readings(client)
 
             # 2. Show Readings for Debugging
             #TODO
@@ -571,21 +683,22 @@ def main() -> None:
             # 4. Control Process to Modify Manual Commands
             # TODO: Implement Controls Algorithm
             proposed_commands = control_placeholder(
-                magna = magna,
-                alicat_controllers = alicat_controllers,
-                lambda_supplies = lambda_supplies,
-                manual_commands = manual_commands,
+                magna_controllers = magna_data,
+                alicat_controllers = alicat_data,
+                lambda_controllers = lambda_data,
+                manual_commands = manual_commands
             )
 
             # 5. Send proposed commands back to LabVIEW
             if proposed_commands.send_magna:
-                set_magna_control(client, proposed_commands.magna)
+                set_magna_control(client, proposed_commands.magna_supplies)
 
             if proposed_commands.send_alicat:
-                set_alicat_control(client, proposed_commands.alicat_controllers)
+                set_alicat_control(client, proposed_commands.alicat_supplies)
 
             if proposed_commands.send_lambda:
                 set_lambda_control(client, proposed_commands.lambda_supplies)
+
 
             time.sleep(0.5)     # Adjust Sleep Cycle Between Reads if Necessary
 
@@ -610,8 +723,4 @@ if __name__ == "__main__":
 
 
 
-# Helper Functions
-
-def clamp(value: float, min_value: float, max_value: float) -> float:
-    return max(min(value, max_value), min_value)
 
