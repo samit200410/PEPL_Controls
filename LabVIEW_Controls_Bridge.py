@@ -603,6 +603,26 @@ def get_oscope_readings(client: LabViewClient) -> list[OscopeReadings]:
     payload = client.request(CMD_OSCOPE_GET_READINGS, empty_payload())
     return unpack_oscope_readings(payload)
 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 def get_all_readings(client: LabViewClient, *, include_oscope: bool = True) -> dict[str, Any]:
 
 
