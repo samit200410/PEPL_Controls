@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from pathlib import Path
 from typing import Any
 
-import copy, json, socket, struct, time
+import copy, socket, struct, time
 
 
 # GLOBAL VARIABLES
@@ -32,6 +31,10 @@ CMD_ALICAT_SET_CONTROL = 0x1C                       # Command 28
 
 CMD_LAMBDA_GET_READINGS = 0x23                      # Command 35
 CMD_LAMBDA_SET_CONTROL = 0x24                       # Command 36
+
+CMD_OSCOPE_GET_READINGS = 0x2B                      # Command 43
+                                                    
+CMD_DMM_GET_READINGS = 0x31                         # Command 49
 
 # ---------------------------------------------------------------------------
 
@@ -120,6 +123,59 @@ class LambdaControl:
     enable: bool = False
 
 @dataclass
+class OscopeAxis:
+    increment: float
+    origin: float
+    reference: int
+
+@dataclass
+class OscopeWaveform:
+    x: OscopeAxis
+    y: OscopeAxis
+    data: list[int]
+
+    # Return physical x-axis values for each waveform point.
+    # For Keysight-style waveform scaling: 
+    #           time[i] = (i - x_reference) * x_increment + x_origin
+
+    def time_values(self) -> list[float]:
+        
+        return [
+            (i - self.x.reference) * self.x.increment + self.x.origin
+            for i in range(len(self.data))
+        ]
+
+    # For Keysight-style waveform scaling:
+    #           ignal[i] = (raw[i] - y_reference) * y_increment + y_origin
+
+    def y_values(self) -> list[float]:
+
+        return [
+            (float(raw_point) - self.y.reference) * self.y.increment + self.y.origin
+            for raw_point in self.data
+        ]
+    
+    @property
+    def sample_rate_hz(self) -> float | None:
+        if self.x.increment == 0:
+            return None
+        return 1.0 / abs(self.x.increment)
+    
+    @property
+    def duration(self) -> float:
+        if len(self.data) <= 1:
+            return 0.0
+        return(len(self.data) - 1) * abs(self.x.increment)
+        
+@dataclass
+class OscopeReadings:
+    label: str
+    peak_to_peak: float
+    rms: float
+    average: float
+    wavform: OscopeWaveform
+
+@dataclass
 class DeviceCommands:
     magna_supplies: MagnaControl
     alicat_supplies: list[AlicatControl]
@@ -165,6 +221,10 @@ class LabViewReader:
     def u16(self) -> int:
         return struct.unpack(">H", self.read_payload(2))[0]
     
+    # Unsigned 32 bit integer (big_endian)
+    def u32(self) -> int:
+        return struct.upnack(">I", self.read_payload(4))[0]
+    
     # 64-bit float (big-endian)
     def f64(self) -> float:
         return struct.unpack(">d", self.read_payload(8))[0]
@@ -188,6 +248,13 @@ class LabViewReader:
         # Replace invalid sequences with the Unicode replacement character instead of crashing
         return raw_bytes.decode("utf-8", errors="replace")
     
+
+    def array_length(self, context:str) -> int:
+        length = self.i32()
+        if length < 0:
+            raise ValueError(f"{context}: negative array length = {length}")
+        return length
+
     def assert_consume_all(self, context: str) -> None:
         if self.remaining() != 0:
             extra = self.payload[self.offset:]
@@ -213,6 +280,9 @@ class LabViewWriter:
     def u16(self, value: int) -> None:
         self.value_types.append(struct.pack(">H", int(value)))
 
+    def u32(self, value: int) -> None:
+        self.value_types.append(struct.pack(">I", int(value)))
+
     def f64(self, value: float) -> None:
         self.value_types.append(struct.pack(">d", float(value)))
 
@@ -223,6 +293,7 @@ class LabViewWriter:
         encoded = str(value).encode("utf-8")
         self.i32(len(encoded))
         self.value_types.append(encoded)
+
 
 def flatten_empty_string() -> bytes:
     writer = LabViewWriter()
@@ -258,7 +329,7 @@ def unpack_alicat_readings(payload: bytes) -> list[AlicatReadings]:
     reader = LabViewReader(payload)
     
     # Array of Clusters
-    n_controllers = reader.i32()
+    n_controllers = reader.array_length("Alicat Readings")
 
     output: list[AlicatReadings] = []
     for _ in range(n_controllers):
@@ -287,7 +358,7 @@ def unpack_lambda_readings(payload: bytes) -> list[LambdaReadings]:
     reader = LabViewReader(payload)
     
     # Array of Clusters
-    n_supplies = reader.i32()
+    n_supplies = reader.array_length("Lambda Readings")
 
     output: list[LambdaReadings] = []
     for _ in range(n_supplies):
@@ -306,6 +377,53 @@ def unpack_lambda_readings(payload: bytes) -> list[LambdaReadings]:
         )
 
     reader.assert_consume_all("Lambda Readings")
+    return output
+
+
+def unpack_oscope_waveform(reader: LabViewReader) -> OscopeWaveform:
+    # Waveform Cluster from LabVIEW:
+    #   X Cluster: X increment (Double), X origin (Double), X Reference (U32)
+    #   Y Cluster: Y increment (Double), Y origin (Double), Y Reference (U32)
+    #   Data: 1D array (U16 points)
+    
+    x_axis = OscopeAxis(
+        increment = reader.f64(),
+        origin = reader.f64(),
+        reference = reader.u32(),
+    )
+
+    y_axis = OscopeAxis(
+        increment = reader.f64(),
+        origin = reader.f64(),
+        reference = reader.u32(),
+    )
+
+    n_points = reader.array_length("Oscope Wavefrom Data")
+    data = [reader.u16() for _ in range(n_points)]
+
+    return OscopeWaveform(x = x_axis, y = y_axis, data = data)
+
+def unpack_oscope_readings(payload: bytes) -> list[OscopeReadings]:
+    reader = LabViewReader(payload)
+
+    # 1-D Array of Keysight O-Scope Single Readings.ctl" Clusters
+    n_readings = reader.array_length("Oscope Readings")
+
+    output: list[OscopeReadings] = []
+
+    for _ in range(n_readings):
+        output.append(
+            OscopeReadings(
+                label = reader.string(),
+                peak_to_peak = reader.f64(),
+                rms = reader.f64(),
+                average = reader.f64(),
+                wavform = unpack_oscope_waveform(reader),
+            )
+        )
+
+    reader.assert_consume_all("Oscope Readings")
+
     return output
 
 
@@ -362,8 +480,8 @@ def receive_from_labview(socket: socket.socket, n_bytes: int) -> bytes:
             packet = socket.recv(n_bytes - len(data))
             if not packet:
                 raise ConnectionError(
-                    f"Socket closed early. Expected {n_bytes} bytes, "
-                    f"but only received {len(data)} bytes before connection closed."
+                    f"Socket closed early. Expected {n_bytes} bytes. "
+                    f"Only received {len(data)} bytes before connection closed."
                 )
             
             data += packet
@@ -372,7 +490,12 @@ def receive_from_labview(socket: socket.socket, n_bytes: int) -> bytes:
 
 class LabViewClient:
     
-    def __init__(self, host: str, port: int, timeout: float = SOCKET_TIMEOUT):
+    def __init__(self,
+                 host: str = LABVIEW_IP,
+                 port: int = LABVIEW_PORT,
+                 timeout: float = SOCKET_TIMEOUT
+                ):
+        
         self.host = host
         self.port = port
         self.timeout = timeout
@@ -382,6 +505,7 @@ class LabViewClient:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.settimeout(self.timeout)
         self.socket.connect((self.host, self.port))
+        
         print(
             f"Connected to LabVIEW at {self.host}:{self.port}"
         )
@@ -390,6 +514,13 @@ class LabViewClient:
         if self.socket is not None:
             self.socket.close()
             self.socket = None
+
+    def __enter__(self) -> "LabViewClient":
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type: Any, exc: Any, tb: Any) -> None:
+        self.close()
 
     def send_packet(self, command_id: int, payload: bytes = b"") -> None:
         if self.socket is None:
@@ -468,23 +599,116 @@ def set_lambda_control(client: LabViewClient, control: list[LambdaControl]) -> N
     response = client.request(CMD_LAMBDA_SET_CONTROL, pack_lambda_control(control))
     return check_empty_ack("Lambda Set Controls", response)
 
+def get_oscope_readings(client: LabViewClient) -> list[OscopeReadings]:
+    payload = client.request(CMD_OSCOPE_GET_READINGS, empty_payload())
+    return unpack_oscope_readings(payload)
+
+def get_all_readings(client: LabViewClient, *, include_oscope: bool = True) -> dict[str, Any]:
+
+
 
 
 # "GET" Measurments & Make a Shipping Packet Acceptable by Control Model
 
 def get_measurements_for_model(client: LabViewClient) -> dict[str, Any]:
 
-    # "GET" all LabVIEW measurements and return a plain Python dictionary
+    # "GET" all LabVIEW measurements and return a plain Python dictionary    
     magna_supplies = get_magna_readings(client)
     alicat_supplies = get_alicat_readings(client)
     lambda_supplies = get_lambda_readings(client)
+    oscope_readings = get_oscope_readings(client)
 
     return {
         "timestamp_s": time.time(),
         "magna": asdict(magna_supplies),
         "alicat": [asdict(item) for item in alicat_supplies],
         "lambda": [asdict(item) for item in lambda_supplies],
+        "oscope": [asdict(item) for item in oscope_readings],
+
     }
+
+
+# Diffusiuon Model Interface
+
+# Wants flat dictionary with physical control names:
+#
+#   {
+#       "anode_flow_rate": float,
+#       "magnet_current_outer": float,
+#       "magnet_current_inner": float,
+#       "discharge_voltage": float,
+#       "cathode_flow_rate": float,
+#   }
+
+# The aliases to connect those physical names to the exact LabVIEW labels
+
+ANODE_ALICAT_LABEL_ALIAS = (
+
+)
+
+CATHODE_ALICAT_LABEL_ALIASES = (
+
+)
+
+OUTER_MAGNET_LAMBDA_LABEL_ALIASES = (
+ 
+)
+
+INNER_MAGNET_LAMBDA_LABEL_ALIASES = (
+
+)
+
+
+
+
+
+
+
+
+
+
+
+def pack_control_inputs_for_model(client: LabViewClient) -> dict[str, float]:
+
+    measurements = get_measurements_for_model(client)
+    
+    magna_raw = measurements["magna"]
+    alicat_raw = measurements["alicat"]
+    lambda_raw = measurements["lambda"]
+
+    # Dynamically search lists of dicts by hardware label
+    def find_by_label(items: list[dict[str, Any]], label_query: str) -> dict[str, Any]:
+        for item in items:
+            if label_query.lower() in str(item.get("label", "")).lower():
+                return item
+        raise ValueError(f"Could not find hardware with label containing '{label_query}'")
+
+    try:
+        # 2. Attempt to resolve devices dynamically by their configured LabVIEW labels
+        anode_mfc = find_by_label(alicat_raw, "anode")
+        cathode_mfc = find_by_label(alicat_raw, "cathode")
+        outer_magnet = find_by_label(lambda_raw, "outer")
+        inner_magnet = find_by_label(lambda_raw, "inner")
+        
+        return {
+            "anode_flow_rate": float(anode_mfc["mass_flow"]),
+            "magnet_current_outer": float(outer_magnet["current"]),
+            "magnet_current_inner": float(inner_magnet["current"]),
+            "discharge_voltage": float(magna_raw["voltage"]),
+            "cathode_flow_rate": float(cathode_mfc["mass_flow"]),
+        }
+
+    except ValueError as e:
+        # 3. Fallback Block: If labels don't match, fall back to sequential list indexing
+        print(f"Warning: Label lookup failed ({e}). Falling back to array order indexing.")
+        
+        return {
+            "anode_flow_rate": float(alicat_raw[0]["mass_flow"]) if len(alicat_raw) > 0 else 0.0,
+            "magnet_current_outer": float(lambda_raw[0]["current"]) if len(lambda_raw) > 0 else 0.0,
+            "magnet_current_inner": float(lambda_raw[1]["current"]) if len(lambda_raw) > 1 else 0.0,
+            "discharge_voltage": float(magna_raw["voltage"]),
+            "cathode_flow_rate": float(alicat_raw[1]["mass_flow"]) if len(alicat_raw) > 1 else 0.0,
+        }
 
 
 
@@ -614,72 +838,6 @@ def send_model_setpoints_to_labview(client: LabViewClient, model_setpoints: dict
     return final_commands
     
 
-
-
-
-
-
-
-
-
-# Main Loop
-
-def main() -> None:
-
-    client = LabViewClient(LABVIEW_IP, LABVIEW_PORT)
-
-    try:
-        client.connect()
-
-        while True:
-
-            # 1. Receive Fresh Readings - All LabVIEW Sections
-
-            magna_data = get_magna_readings(client)
-            alicat_data = get_alicat_readings(client)
-            lambda_data = get_lambda_readings(client)
-
-            # 2. Show Readings for Debugging
-            #TODO
-
-
-            # 3. Load Commands from Local Editable JSON File 
-            # TODO: For Future Implementation --> Create GUI
-            manual_commands = 
-
-            # 4. Control Process to Modify Manual Commands
-            # TODO: Implement Controls Algorithm
-            proposed_commands = control_placeholder(
-                magna_controllers = magna_data,
-                alicat_controllers = alicat_data,
-                lambda_controllers = lambda_data,
-                manual_commands = manual_commands
-            )
-
-            # 5. Send proposed commands back to LabVIEW
-            if proposed_commands.send_magna:
-                set_magna_control(client, proposed_commands.magna_supplies)
-
-            if proposed_commands.send_alicat:
-                set_alicat_control(client, proposed_commands.alicat_supplies)
-
-            if proposed_commands.send_lambda:
-                set_lambda_control(client, proposed_commands.lambda_supplies)
-
-
-            time.sleep(0.5)     # Adjust Sleep Cycle Between Reads if Necessary
-
-
-    except KeyboardInterrupt:
-        print("\nStopped by user input.")
-
-    finally:
-        client.close()
-        print("Socket closed.")
-
-
-if __name__ == "__main__":
-    main()
 
 
 
