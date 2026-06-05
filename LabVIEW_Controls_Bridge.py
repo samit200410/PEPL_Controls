@@ -156,7 +156,7 @@ class OscopeWaveform:
         ]
     
     @property
-    def sample_rate_hz(self) -> float | None:
+    def sample_rate(self) -> float | None:
         if self.x.increment == 0:
             return None
         return 1.0 / abs(self.x.increment)
@@ -603,80 +603,140 @@ def get_oscope_readings(client: LabViewClient) -> list[OscopeReadings]:
     payload = client.request(CMD_OSCOPE_GET_READINGS, empty_payload())
     return unpack_oscope_readings(payload)
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# Raw LabVIEW Collection
 def get_all_readings(client: LabViewClient, *, include_oscope: bool = True) -> dict[str, Any]:
-
-
-
-
-# "GET" Measurments & Make a Shipping Packet Acceptable by Control Model
-
-def get_measurements_for_model(client: LabViewClient) -> dict[str, Any]:
-
-    # "GET" all LabVIEW measurements and return a plain Python dictionary    
+    
     magna_supplies = get_magna_readings(client)
     alicat_supplies = get_alicat_readings(client)
     lambda_supplies = get_lambda_readings(client)
-    oscope_readings = get_oscope_readings(client)
 
-    return {
-        "timestamp_s": time.time(),
+    packet: dict[str, Any] = {
+        "timestamp": time.time(),
         "magna": asdict(magna_supplies),
         "alicat": [asdict(item) for item in alicat_supplies],
         "lambda": [asdict(item) for item in lambda_supplies],
-        "oscope": [asdict(item) for item in oscope_readings],
+    }
 
+    if include_oscope:
+        oscope = get_oscope_readings(client)
+        packet["oscope"] = [asdict(item) for item in oscope]
+
+
+    return packet
+
+
+# Label Matching
+
+ANODE_ALICAT_LABEL = {
+    "anode",
+}
+
+CATHODE_ALICAT_LABLE = {
+    "cathode"
+}
+
+OUTER_MAGNET_LAMBDA = {
+    "outer"
+    "outer magnet"
+    "outer_magnet"
+}
+
+INNER_MAGNET_LAMBDA ={
+    "inner"
+    "inner magnet"
+    "inner_magnet"
+}
+
+OSCOPE_DISCHARGE_CURRENT = {
+    "discharge current"
+    "discharge_current"
+}
+
+OSCOPE_PLASMA_POTENTIAL = {
+    "plasma potenital"
+    "plasma_potential"
+}
+
+def normalize_categorization_label(label: str) -> str:
+    return "".join(ch.lower() for ch in str(label) if ch.isalnum())
+
+def get_field(item: Any, field_name: str, default: Any = None) -> Any:
+    if isinstance(item, dict):
+        return item.get(field_name, default)
+    return getattr(item, field_name, default)
+
+def find_by_label(items: list[Any], aliases: tuple[str, ...], device_kind: str) -> Any:
+    desired = {normalize_categorization_label(alias) for alias in aliases}
+
+    for item in items:
+        item_label = str(get_field(item, "label", ""))
+        if normalize_categorization_label(item_label) in desired:
+            return item
+        
+        avaiable_labels = [str(get_field(item, "label", "<missing label>"))]
+        raise ValueError(
+            f"Cound not find {device_kind} mathcing alises {aliases}. "
+            f"Avaiable labels from LabVIEW: {avaiable_labels}. "
+            f"Update the corresponding **Aliases Labels**."
+        )
+
+def print_avaiable_labels(readings: dict[str, Any]) -> None:
+    print("Alicat Labels:", [str(get_field(item, "label", "")) for item in readings.get("alicat", [])])
+    print("Lambda Labels:", [str(get_field(item, "label", "")) for item in readings.get("lambda", [])])
+    print("Oscope Labels:", [str(get_field(item, "label", "")) for item in readings.get("oscope", [])])
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def build_control_input_packet(
+    readings: dict[str, Any],
+    *,
+    use_actual_readings: bool = False
+) -> dict[str, float]:
+    
+    magna_raw = readings["magna"]
+    alicat_raw = readings["alicat"]
+    lambda_raw = readings["lambda"]
+
+    anode = find_by_label(alicat_raw, ANODE_ALICAT_LABEL, "anode Alicat controller")
+    cathode = find_by_label(alicat_raw, CATHODE_ALICAT_LABLE, "cathode Alicat controller")
+    outer = find_by_label(lambda_raw, OUTER_MAGNET_LAMBDA, "outer magnet Lambda supply")
+    inner = find_by_label(lambda_raw, INNER_MAGNET_LAMBDA, "inner magnet Lambda supply")
+
+    if use_actual_readings:
+        return {
+            "anode_flow_rate": float(get_field(anode, "mass_flow")),
+            "magnet_current_outer": float(get_field(outer, "current")),
+            "magnet_current_inner": float(get_field(inner, "current")),
+            "discharge_voltage": float(get_field(magna_raw, "voltage")),
+            MODEL_CATHODE_FLOW_KEY: float(get_field(cathode, "mass_flow")),
+        }
+
+    return {
+        "anode_flow_rate": float(get_field(anode, "setpoint")),
+        "magnet_current_outer": float(get_field(outer, "current_limit")),
+        "magnet_current_inner": float(get_field(inner, "current_limit")),
+        "discharge_voltage": float(get_field(magna_raw, "voltage_limit")),
+        MODEL_CATHODE_FLOW_KEY: float(get_field(cathode, "setpoint")),
     }
 
 
-# Diffusiuon Model Interface
-
-# Wants flat dictionary with physical control names:
-#
-#   {
-#       "anode_flow_rate": float,
-#       "magnet_current_outer": float,
-#       "magnet_current_inner": float,
-#       "discharge_voltage": float,
-#       "cathode_flow_rate": float,
-#   }
-
-# The aliases to connect those physical names to the exact LabVIEW labels
-
-ANODE_ALICAT_LABEL_ALIAS = (
-
-)
-
-CATHODE_ALICAT_LABEL_ALIASES = (
-
-)
-
-OUTER_MAGNET_LAMBDA_LABEL_ALIASES = (
- 
-)
-
-INNER_MAGNET_LAMBDA_LABEL_ALIASES = (
-
-)
 
 
 
@@ -688,47 +748,6 @@ INNER_MAGNET_LAMBDA_LABEL_ALIASES = (
 
 
 
-def pack_control_inputs_for_model(client: LabViewClient) -> dict[str, float]:
-
-    measurements = get_measurements_for_model(client)
-    
-    magna_raw = measurements["magna"]
-    alicat_raw = measurements["alicat"]
-    lambda_raw = measurements["lambda"]
-
-    # Dynamically search lists of dicts by hardware label
-    def find_by_label(items: list[dict[str, Any]], label_query: str) -> dict[str, Any]:
-        for item in items:
-            if label_query.lower() in str(item.get("label", "")).lower():
-                return item
-        raise ValueError(f"Could not find hardware with label containing '{label_query}'")
-
-    try:
-        # 2. Attempt to resolve devices dynamically by their configured LabVIEW labels
-        anode_mfc = find_by_label(alicat_raw, "anode")
-        cathode_mfc = find_by_label(alicat_raw, "cathode")
-        outer_magnet = find_by_label(lambda_raw, "outer")
-        inner_magnet = find_by_label(lambda_raw, "inner")
-        
-        return {
-            "anode_flow_rate": float(anode_mfc["mass_flow"]),
-            "magnet_current_outer": float(outer_magnet["current"]),
-            "magnet_current_inner": float(inner_magnet["current"]),
-            "discharge_voltage": float(magna_raw["voltage"]),
-            "cathode_flow_rate": float(cathode_mfc["mass_flow"]),
-        }
-
-    except ValueError as e:
-        # 3. Fallback Block: If labels don't match, fall back to sequential list indexing
-        print(f"Warning: Label lookup failed ({e}). Falling back to array order indexing.")
-        
-        return {
-            "anode_flow_rate": float(alicat_raw[0]["mass_flow"]) if len(alicat_raw) > 0 else 0.0,
-            "magnet_current_outer": float(lambda_raw[0]["current"]) if len(lambda_raw) > 0 else 0.0,
-            "magnet_current_inner": float(lambda_raw[1]["current"]) if len(lambda_raw) > 1 else 0.0,
-            "discharge_voltage": float(magna_raw["voltage"]),
-            "cathode_flow_rate": float(alicat_raw[1]["mass_flow"]) if len(alicat_raw) > 1 else 0.0,
-        }
 
 
 
@@ -739,7 +758,22 @@ def pack_control_inputs_for_model(client: LabViewClient) -> dict[str, float]:
 
 
 
-# Fetch Control Model Setpoints & "SET" them in LabVIEW
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# Fetch Control Model Setpoints & "SET" them in LabVIEW --> ??????
 
 def commands_from_measurements(measurements: dict[str, Any]) -> DeviceCommands:
     magna_raw = measurements["magna"]
